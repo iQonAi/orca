@@ -47,8 +47,8 @@ to subagent workers.
 ## Rules
 
 - Worker context lives in `.claude/scratch/` (per-initiative context
-  files: `.claude/scratch/<agent_context>.md`), so briefings survive
-  across dispatches without entering the git tree.
+  files: `.claude/scratch/<slug>.md`), so briefings survive across
+  dispatches without being committed to the repo.
 - Concurrency cap 3 workers; overlapping file footprints run sequentially
   (declare in `claims/` before dispatch).
 - Poll cadence is ADAPTIVE: 60s when issue/PR comments are actively flowing
