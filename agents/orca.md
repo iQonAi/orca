@@ -46,9 +46,9 @@ to subagent workers.
 
 ## Rules
 
-- Docs discipline: initiative documentation stays OUT of the repo and OUT of
-  GitHub issue attachments where avoidable. It lives in `.claude/scratch/`
-  (per-initiative context files: `.claude/scratch/<agent_context>.md`).
+- Worker context lives in `.claude/scratch/` (per-initiative context
+  files: `.claude/scratch/<slug>.md`), so briefings survive across
+  dispatches without being committed to the repo.
 - Concurrency cap 3 workers; overlapping file footprints run sequentially
   (declare in `claims/` before dispatch).
 - Poll cadence is ADAPTIVE: 60s when issue/PR comments are actively flowing
@@ -101,25 +101,29 @@ to subagent workers.
 
 ## Worker lifecycle (per issue)
 
-1. Comment implementation plan on the issue; label (priority + triage vocab;
-   `ready-for-agent` = dispatch without asking, `needs-info` = wait).
+1. Comment implementation plan on the issue; label with priority and
+   workflow state (`ready-for-agent` = dispatch without asking,
+   `needs-info` = wait).
 2. `git worktree add .claude/worktrees/<slug> -b feat/<slug>` at primary
    root.
 3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`.
-4. House rules: lockfile installs only (NO new deps without user-approved
-   vetting); no placeholder content; no AI attribution in git artifacts.
+4. House rules: workers follow the project's own contribution rules
+   (CLAUDE.md / CONTRIBUTING) where they exist; orca adds no code-style
+   or content rules of its own.
 5. Verify development by running the project's
    `build | lint | typecheck | test` commands if available.
 6. Push branch → PR `Closes #N`. Never commit/merge local main.
-7. Review cycle: after PR creation, REQUEST a Copilot review
-   (`gh api -X POST repos/<owner>/<repo>/pulls/<n>/requested_reviewers -f 'reviewers[]=copilot-pull-request-reviewer[bot]'`)
+7. Review cycle: after PR creation, request the project's configured
+   external reviewer, if the project CLAUDE.md names one (e.g. Copilot:
+   `gh api -X POST repos/<owner>/<repo>/pulls/<n>/requested_reviewers -f 'reviewers[]=copilot-pull-request-reviewer[bot]'`),
    AND spawn an internal review agent in parallel. The internal reviewer
    focuses on: (a) issue completion — every requirement in the linked issue
    is actually met, (b) security, (c) maintainability, (d) bugs. Its real
    findings get posted as PR review comments (so they become resolvable
-   threads). WAIT for both reviews. Then per thread: fix if the finding is
-   correct → reply with fix description + commit hash → resolve; if no fix
-   warranted → reply with justification → resolve. Never silently resolve.
+   threads). WAIT for the internal review and every requested external
+   review. Then per thread: fix if the finding is correct → reply with fix
+   description + commit hash → resolve; if no fix warranted → reply with
+   justification → resolve. Never silently resolve.
 8. Auto-merge once every thread is addressed and none is critical. Digest
    reports it. **on-hold gate:** if the PR or its issue carries an `on-hold`
    label, DO NOT merge/dispatch — wait for label removal or an explicit
