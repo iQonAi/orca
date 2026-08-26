@@ -26,33 +26,41 @@ the rest and reports a digest each cycle.
 
 ## Install
 
-Symlink the components into `~/.claude/`:
+One line — it prompts for which configuration style to install:
 
 ```sh
-mkdir -p ~/.claude/agents ~/.claude/hooks ~/.claude/scripts
-ln -s "$PWD/agents/orca.md"              ~/.claude/agents/orca.md
-ln -s "$PWD/hooks/orca-start-watcher.sh" ~/.claude/hooks/orca-start-watcher.sh
-ln -s "$PWD/scripts/gh-watch.sh"         ~/.claude/scripts/gh-watch.sh
+curl -fsSL https://raw.githubusercontent.com/iQonAi/orca/main/install.sh | sh
 ```
 
-Wire the SessionStart hook in `~/.claude/settings.json`:
+Or, to read before you run:
 
-```json
-{
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "~/.claude/hooks/orca-start-watcher.sh"
-          }
-        ]
-      }
-    ]
-  }
-}
+```sh
+git clone https://github.com/iQonAi/orca.git && cd orca && ./install.sh
 ```
+
+Styles:
+
+- **claude** — symlinks the agent, hook, and watcher into
+  `~/.claude/{agents,hooks,scripts}` and wires the SessionStart hook into
+  `~/.claude/settings.json` (needs `jq`; prints the snippet to add by hand
+  if `jq` is missing).
+- **agents** — for AGENTS.md-convention agents (Codex/Cursor/Gemini-class):
+  installs the watcher to `~/.local/bin/gh-watch` and the playbook to
+  `~/.config/orca/AGENTS.md`. The SessionStart hook is Claude-specific and
+  is skipped; launch the watcher yourself per the playbook.
+
+Environment overrides:
+
+| Variable      | Default                | Meaning                                        |
+| ------------- | ---------------------- | ---------------------------------------------- |
+| `ORCA_STYLE`  | (prompt)               | `claude` or `agents`; skips the prompt. With no tty, an existing `~/.claude` selects claude, otherwise the script exits 2 |
+| `ORCA_REPO`   | `~/.local/share/orca`  | where the piped install clones the repo        |
+| `ORCA_MODE`   | `link`                 | `copy` to copy files instead of symlinking     |
+| `CLAUDE_HOME` | `~/.claude`            | claude-style destination                       |
+| `ORCA_BIN`    | `~/.local/bin`         | agents-style watcher destination               |
+
+Re-runs are idempotent. Anything replaced is backed up to
+`~/.orca-backups/<timestamp>/`.
 
 `~/.claude/scripts/` is the home for runtime helper scripts. Do not use
 `~/.claude/jobs/` — Claude Code reserves it for background-job state.
