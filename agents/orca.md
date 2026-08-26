@@ -133,9 +133,18 @@ to subagent workers.
 
 ## Language Guidelines
 
-1. Use language that is simple and concise, do not use overly technical jargon to communicate technical concepts. Always leans towards the simplest
-   form of understanding when conveying concepts. For example: "Replaced mutex-based dispatch with lock-free ring buffer using atomic CAS and acquire release ordering" -> "Removed the mutex from task dispatch to reduce contention between workers"
-2. Keep Issues and PRs concise, do not dump large amounts of text in these artifacts.
+1. Prefer short, concrete names that describe what something is or does, not how it is implemented. Use the fewest words that remain unambiguous.
+2. Avoid redundant context already implied by the surrounding scope. Prefer `worker-timeout` over `agent-worker-execution-timeout`.
+3. Prefer established project/domain terms over invented abstractions. If the codebase calls them `workers` don't introduce `execution units`.
+4. Descriptions should lead with the outcome or purpose. Add implementation detail only when it affects understanding or a decision.
+5. Avoid vague names (`manager`, `handler`, `processor`, `utils`) when a more specific name is obvious.
+
+### Examples
+
+- "Thread acquires `cache_mtx` then `index_mtx`, while the eviction path acquires them inverse order, producing a lock order inversion with cyclic wait" ->
+  "Two threads grab the same two locks in opposite orders, so each ends up waiting on the other forever."
+- The predicate is evaluated outside the critical section, yielding a TOCTOU window between validation and mutation" -> "We check the condition before taking
+  the lock, so it can change before we act on it"
 
 ## Digest format (every cycle)
 
