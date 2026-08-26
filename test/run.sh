@@ -351,6 +351,66 @@ reap_live_watchers
 unset GH_WATCH_STATE_DIR
 
 # ---------------------------------------------------------------------------
+# install.sh — style selection, layouts, idempotency
+#
+# Hermetic: every case points HOME at a temp dir, so the real ~/.claude and
+# ~/.local are never touched. ORCA_STYLE bypasses the /dev/tty prompt. The
+# no-tty case runs under setsid (no controlling terminal) so it behaves the
+# same in an interactive shell and in CI.
+
+INSTALL_SH="$REPO_ROOT/install.sh"
+INST_TMP="$(mktemp -d)"
+trap 'reap_live_watchers; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/null; rm -rf "$WATCHER_TMP" "$GH_TMP" "$INST_TMP"' EXIT
+
+# claude style on a fresh HOME
+IH1="$INST_TMP/h1"; mkdir -p "$IH1"
+OUT1="$(ORCA_STYLE=claude HOME="$IH1" sh "$INSTALL_SH" </dev/null 2>&1)"; RC1=$?
+wassert 'install: claude style exits 0' test "$RC1" -eq 0
+wassert 'install: agent symlink points into the repo' \
+  test "$(readlink "$IH1/.claude/agents/orca.md")" = "$REPO_ROOT/agents/orca.md"
+wassert 'install: hook and watcher installed' \
+  bash -c "test -e '$IH1/.claude/hooks/orca-start-watcher.sh' && test -e '$IH1/.claude/scripts/gh-watch.sh'"
+wassert 'install: SessionStart hook wired exactly once' \
+  test "$(jq '.hooks.SessionStart | length' "$IH1/.claude/settings.json")" = 1
+printf '%s' "$OUT1" | grep -q 'backup:' && FRESH_BACKUP=1 || FRESH_BACKUP=0
+wassert 'install: fresh install makes no backups' test "$FRESH_BACKUP" = 0
+
+# rerun is a no-op
+OUT2="$(ORCA_STYLE=claude HOME="$IH1" sh "$INSTALL_SH" </dev/null 2>&1)"; RC2=$?
+wassert 'install: rerun exits 0' test "$RC2" -eq 0
+printf '%s' "$OUT2" | grep -qE 'installed:|backup:' && RERUN_CHANGED=1 || RERUN_CHANGED=0
+wassert 'install: rerun changes nothing (idempotent)' test "$RERUN_CHANGED" = 0
+wassert 'install: rerun leaves exactly one SessionStart entry' \
+  test "$(jq '.hooks.SessionStart | length' "$IH1/.claude/settings.json")" = 1
+
+# agents style
+IH2="$INST_TMP/h2"; mkdir -p "$IH2"
+ORCA_STYLE=agents HOME="$IH2" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC3=$?
+wassert 'install: agents style exits 0' test "$RC3" -eq 0
+wassert 'install: agents style installs watcher + playbook' \
+  bash -c "test -e '$IH2/.local/bin/gh-watch' && test -e '$IH2/.config/orca/AGENTS.md'"
+wassert 'install: agents style creates no ~/.claude' test ! -d "$IH2/.claude"
+
+# no tty, no ORCA_STYLE, nothing to detect -> refuse with exit 2, never hang
+IH3="$INST_TMP/h3"; mkdir -p "$IH3"
+if command -v setsid >/dev/null 2>&1; then
+  HOME="$IH3" setsid sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC4=$?
+  wassert 'install: no tty + no ORCA_STYLE exits 2' test "$RC4" -eq 2
+else
+  printf 'skip: install: no-tty case (setsid unavailable)\n'
+fi
+
+# copy mode replaces (and backs up) a pre-existing file with a regular file
+IH4="$INST_TMP/h4"; mkdir -p "$IH4/.claude/agents"
+printf 'old\n' > "$IH4/.claude/agents/orca.md"
+ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC5=$?
+wassert 'install: copy mode exits 0' test "$RC5" -eq 0
+wassert 'install: copy mode installs a regular file, not a link' \
+  bash -c "test -f '$IH4/.claude/agents/orca.md' && test ! -L '$IH4/.claude/agents/orca.md'"
+wassert 'install: pre-existing file was backed up' \
+  bash -c "ls '$IH4'/.orca-backups/*/orca.md >/dev/null 2>&1"
+
+# ---------------------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
