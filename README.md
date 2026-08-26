@@ -53,7 +53,7 @@ Environment overrides:
 
 | Variable      | Default                | Meaning                                        |
 | ------------- | ---------------------- | ---------------------------------------------- |
-| `ORCA_STYLE`  | (prompt)               | `claude` or `agents`; required when no tty     |
+| `ORCA_STYLE`  | (prompt)               | `claude` or `agents`; skips the prompt. With no tty, an existing `~/.claude` selects claude, otherwise the script exits 2 |
 | `ORCA_REPO`   | `~/.local/share/orca`  | where the piped install clones the repo        |
 | `ORCA_MODE`   | `link`                 | `copy` to copy files instead of symlinking     |
 | `CLAUDE_HOME` | `~/.claude`            | claude-style destination                       |
