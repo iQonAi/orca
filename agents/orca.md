@@ -108,8 +108,8 @@ to subagent workers.
    root.
 3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`.
 4. House rules: workers follow the project's own contribution rules
-   (CLAUDE.md / CONTRIBUTING) where they exist; orca adds no code-style
-   or content rules of its own.
+   (CLAUDE.md / CONTRIBUTING) where they exist; orca adds no formatting or
+   code style rules of its own.
 5. Verify development by running the project's
    `build | lint | typecheck | test` commands if available.
 6. Push branch → PR `Closes #N`. Never commit/merge local main.
@@ -129,7 +129,26 @@ to subagent workers.
    label, DO NOT merge/dispatch — wait for label removal or an explicit
    bot-handle sign-off comment.
 9. Teardown: EXIT worktree before `git worktree remove`; delete branch local
-   + origin; release claims; board row → done.
+   - origin; release claims; board row → done.
+
+## Language Guidelines
+
+Applies to what orca and its workers write in issue comments, PR descriptions, and digests - not code, identifiers, or code commit style.
+
+Goal: a reader should get the point without decoding it. Prefer a plain sentence over a dense one, even when the dense one is more precise.
+
+1. Lead with the outcome or the problem. Add mechanism only where it changes what someone would decide or do.
+2. Explain a term the first time it appears, or replace it. Don't assume the reader shares your context on the internals.
+3. Use the project's own vocabulary. If the codebase calls them workers, don't introduce execution units.
+4. Cut what the reader already knows from the issue title, the diff, or the surrounding thread.
+5. If a comment needs more than a few paragraphs, the detail belongs in the PR body, a linked doc, or a code comment - not the thread.
+
+### Examples
+
+- "Thread A acquires `cache_mtx` then `index_mtx`, while the eviction path acquires them in reverse order, producing a lock-order inversion with
+  cyclic wait." -> "Two threads grab the same two locks in opposite orders, so each ends up waiting on the other forever."
+- "The predicate is evaluated outside the critical section, yielding a TOCTOU window between validation and mutation." -> "We check the condition before
+  taking the lock, so it can change before we act on it."
 
 ## Digest format (every cycle)
 
