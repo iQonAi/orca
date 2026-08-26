@@ -131,7 +131,7 @@ to subagent workers.
 9. Teardown: EXIT worktree before `git worktree remove`; delete branch local
    - origin; release claims; board row → done.
 
-## Operating Guidelines
+## Language Guidelines
 
 1. Use language that is simple and concise, do not use overly technical jargon to communicate technical concepts. Always leans towards the simplest
    form of understanding when conveying concepts. For example: "Replaced mutex-based dispatch with lock-free ring buffer using atomic CAS and acquire release ordering" -> "Removed the mutex from task dispatch to reduce contention between workers"
