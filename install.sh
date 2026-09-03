@@ -3,6 +3,47 @@ set -eu
 
 ORCA_URL="${ORCA_URL:-https://github.com/iQonAi/orca.git}"
 
+# Parsed FIRST, before the bootstrap block below. Under `curl | sh -s --
+# --uninstall` the piped copy is the ONLY copy that has seen the flag: if it
+# re-executed the install.sh already on disk, an older one without this loop
+# would silently ignore --uninstall and INSTALL instead - the documented
+# uninstall command doing the exact opposite of what it says.
+ACTION=install
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall) ACTION=uninstall ;;
+        # Rejected rather than ignored: a typo'd flag must not silently run
+        # the opposite action of the one that was asked for.
+        *) echo "unrecognized option: $arg" >&2; exit 2 ;;
+    esac
+done
+
+if [ "$ACTION" = uninstall ]; then
+    # Every uninstall target is built from $HOME, so it is normalized and
+    # vetted HERE - before the bootstrap block below builds its first path
+    # from it. `cd`+`pwd` collapses the spellings a pattern match misses
+    # (`/.`, `/tmp/..`, a relative or non-existent $HOME) to one canonical
+    # form; `//` survives it (POSIX leaves a leading `//` implementation-
+    # defined) so it is rejected explicitly. Logical `pwd`, not `pwd -P`: a
+    # symlinked $HOME reaches the same files, and rewriting it to the
+    # physical path would only make the output unrecognizable to the user.
+    # The -n test is load-bearing, not belt-and-braces: `cd ""` SUCCEEDS and
+    # stays put, so an empty $HOME would resolve to the caller's cwd and sail
+    # through every check below.
+    # SC1007: see the CDPATH= note below.
+    HOME_DIR=
+    if [ -n "${HOME:-}" ]; then
+        # shellcheck disable=SC1007
+        HOME_DIR=$(CDPATH= cd -- "$HOME" 2>/dev/null && pwd) || HOME_DIR=
+    fi
+    case "$HOME_DIR" in
+        ""|/|//)
+            echo "refusing to uninstall: HOME must be a usable directory, not '${HOME-<unset>}'" >&2
+            exit 1 ;;
+    esac
+    HOME=$HOME_DIR
+fi
+
 # Trust $0 only when it is a real file: under `curl | sh` $0 is the shell
 # name, and resolving it to the cwd would let any directory that happens to
 # contain agents/orca.md hijack the install source.
@@ -31,28 +72,31 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
        "~") ORCA_REPO="$HOME" ;;
        "~/"*) ORCA_REPO="$HOME/${ORCA_REPO#"~/"}" ;;
    esac
-   if [ ! -f "$ORCA_REPO/agents/orca.md" ]; then
-       command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
-       git clone --depth 1 "$ORCA_URL" "$ORCA_REPO"
+   if [ "$ACTION" = uninstall ]; then
+       # A teardown never fetches and never re-executes. Not fetching,
+       # because uninstall that needs the network (or git) is broken by
+       # design, and because `pull` would mutate the very checkout that
+       # copy-mode provenance compares against - silently turning orca's own
+       # files into "not ours" and leaving them installed. Not re-executing,
+       # because the copy on disk may predate --uninstall and would install.
+       # The checkout is a read-only reference here, nothing more; without
+       # one, links are still verifiable but copies are not.
+       [ -f "$ORCA_REPO/agents/orca.md" ] || ORCA_REPO=
    else
-       # A piped install means "give me current orca" - refresh the clone.
-       # A checkout that cannot fast-forward installs what it has.
-       git -C "$ORCA_REPO" pull --ff-only -q 2>/dev/null \
-         || echo "warn: could not update $ORCA_REPO; installing its current version"
+       if [ ! -f "$ORCA_REPO/agents/orca.md" ]; then
+           command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
+           git clone --depth 1 "$ORCA_URL" "$ORCA_REPO"
+       else
+           # A piped install means "give me current orca" - refresh the clone.
+           # A checkout that cannot fast-forward installs what it has.
+           git -C "$ORCA_REPO" pull --ff-only -q 2>/dev/null \
+             || echo "warn: could not update $ORCA_REPO; installing its current version"
+       fi
+       exec "$ORCA_REPO/install.sh" "$@"
    fi
-   exec "$ORCA_REPO/install.sh" "$@"
+else
+   ORCA_REPO="$script_dir"
 fi
-ORCA_REPO="$script_dir"
-
-ACTION=install
-for arg in "$@"; do
-    case "$arg" in
-        --uninstall) ACTION=uninstall ;;
-        # Rejected rather than ignored: a typo'd flag must not silently run
-        # the opposite action of the one that was asked for.
-        *) echo "unrecognized option: $arg" >&2; exit 2 ;;
-    esac
-done
 
 resolve_style() {
     case "${ORCA_STYLE:-}" in claude|agents) STYLE=$ORCA_STYLE; return 0 ;; esac
@@ -159,16 +203,24 @@ install_agents() {
 # own merits, so uninstall needs no style prompt and is idempotent.
 
 installer_made() { # $1 dst, $2 source path inside the repo
+    #   0 = the installer made this   1 = not ours   2 = cannot tell
     if [ -L "$1" ]; then
         # link mode: ours only if it points at <an orca checkout>/$2. The
         # exact-$ORCA_REPO case is the normal install; the suffix case lets a
-        # piped uninstall (which clones its own copy) still recognize a link
-        # made from a different checkout, without accepting a link that merely
-        # happens to sit at this path.
+        # piped uninstall still recognize a link made from a different
+        # checkout, without accepting a link that merely happens to sit here.
         target=$(readlink "$1")
+        if [ -n "$ORCA_REPO" ] && [ "$target" = "$ORCA_REPO/$2" ]; then
+            return 0
+        fi
         case "$target" in
-            "$ORCA_REPO/$2") return 0 ;;
-            */"$2")
+            # Anchored at `/`: install only ever writes ABSOLUTE links, and an
+            # unanchored `*/"$2"` would resolve a relative target like
+            # `./agents/orca.md` against the UNINSTALLER's cwd - so a user's
+            # own relative link would be "verified" by the checkout the
+            # command was merely run from, and deleted. Anchoring keeps the
+            # test on the link itself, not on where we happen to stand.
+            /*/"$2")
                 root=${target%"/$2"}
                 if [ -f "$root/agents/orca.md" ] && [ -f "$root/install.sh" ]; then
                     return 0
@@ -180,17 +232,31 @@ installer_made() { # $1 dst, $2 source path inside the repo
     # copy mode: ours only if byte-identical to the source it was copied from.
     # A file the user wrote or edited is theirs and stays.
     [ -f "$1" ] || return 1
+    # No checkout to compare against (piped uninstall on a machine that has
+    # none). Guessing either way is worse than saying so.
+    [ -n "$ORCA_REPO" ] || return 2
     cmp -s "$ORCA_REPO/$2" "$1" 2>/dev/null
 }
 
 remove_installed() { # $1 dst, $2 source path inside the repo
     [ -e "$1" ] || [ -L "$1" ] || return 0
-    if installer_made "$1" "$2"; then
-        rm -f "$1"
-        echo "    removed: $1"
-    else
-        echo "    left alone: $1 (not what the installer creates - yours, or edited)"
-    fi
+    installer_made "$1" "$2" && verdict=0 || verdict=$?
+    case "$verdict" in
+        0)
+            # rm -f on a symlink unlinks the link, never its target.
+            if rm -f "$1" 2>/dev/null; then
+                echo "    removed: $1"
+            else
+                echo "    ! could not remove $1 - left in place"
+                LEFT=$((LEFT + 1))
+            fi ;;
+        2)
+            echo "    ! cannot verify $1 without a local orca checkout - left in place"
+            echo "      (re-run --uninstall from a checkout, e.g. git clone && ./install.sh --uninstall)"
+            LEFT=$((LEFT + 1)) ;;
+        *)
+            echo "    left alone: $1 (not what the installer creates - yours, or edited)" ;;
+    esac
 }
 
 unwire_claude_hook() {
@@ -221,7 +287,7 @@ unwire_claude_hook() {
     fi
     n=$(jq --argjson d "$drop" \
         '[(.hooks.SessionStart // [])[] | select(. as $e | $d | index($e))] | length' "$1" 2>/dev/null) \
-        || { echo "    ! $1 is not valid JSON - left as-is"; return 0; }
+        || { echo "    ! $1 is not valid JSON - left as-is"; LEFT=$((LEFT + 1)); return 0; }
     if [ "$n" = 0 ]; then
         # Nothing of ours in there: do not rewrite the file at all, so an
         # untouched settings.json keeps its own formatting byte-for-byte.
@@ -240,6 +306,7 @@ unwire_claude_hook() {
         else
             rm -f "$tmp"
             echo "    ! could not rewrite $1 - left as-is"
+            LEFT=$((LEFT + 1))
             return 0
         fi
     fi
@@ -269,13 +336,23 @@ uninstall_agents() {
 }
 
 uninstall() {
-    # Every path below is built from $HOME. An unset or empty HOME would make
-    # them absolute paths under /, so refuse before anything is removed.
-    case "${HOME:-}" in
-        ""|/) echo "refusing to uninstall: HOME is unset, empty, or /" >&2; exit 1 ;;
-    esac
-    [ -d "$HOME" ] || { echo "refusing to uninstall: HOME ($HOME) is not a directory" >&2; exit 1; }
-    echo "Uninstalling orca (comparing against $ORCA_REPO)"
+    # $HOME was normalized and vetted at the top, before any path was built.
+    #
+    # BEST EFFORT, not fail-fast: `set -eu` would abort the whole sweep on the
+    # first failed `rm` - leaving some files installed, the hook still wired,
+    # and no summary - and the user would then have to re-run once per
+    # failure to discover the rest. A teardown is exactly where partial
+    # failure is normal (read-only mounts, permissions, files already moved),
+    # so every step runs, everything left behind is named as it happens, and
+    # the count is reported at the end. The exit status still tells the truth:
+    # non-zero when anything remains, so a script can detect it, and the run
+    # is idempotent so a re-run after fixing the cause finishes the job.
+    LEFT=0
+    if [ -n "$ORCA_REPO" ]; then
+        echo "Uninstalling orca (comparing against $ORCA_REPO)"
+    else
+        echo "Uninstalling orca (no local checkout to compare against)"
+    fi
     echo "  claude style:"
     uninstall_claude
     echo "  agents style:"
@@ -284,11 +361,17 @@ uninstall() {
         echo "  note: files the installer replaced are still in $HOME/.orca-backups/"
         echo "        (untouched by uninstall - restore the ones you want by hand)."
     fi
+    if [ "$LEFT" -gt 0 ]; then
+        echo "done, but $LEFT item(s) are still installed - see the ! lines above."
+        return 1
+    fi
     echo "done."
 }
 
 if [ "$ACTION" = uninstall ]; then
-    uninstall
+    # `|| exit 1` and not a bare call: `set -e` would abort on the non-zero
+    # return before the exit status could be handed back deliberately.
+    uninstall || exit 1
     exit 0
 fi
 

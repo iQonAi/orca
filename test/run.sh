@@ -621,13 +621,16 @@ for t in sh dirname readlink cmp rm rmdir mktemp date mkdir ln cp; do
 done
 if [[ "$NOJQ_OK" == 1 ]]; then
   ORCA_STYLE=claude HOME="$IH13" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-  NOJQ_BEFORE="$(cat "$IH13/.claude/settings.json")"
+  # cmp, not "$(cat x)" = "$(cat y)": command substitution strips trailing
+  # newlines, so a string compare cannot see a trailing-newline-only change
+  # and has no business claiming "byte-for-byte".
+  cp "$IH13/.claude/settings.json" "$INST_TMP/nojq-settings.before"
   OUTU5="$(env -i PATH="$NOJQ_BIN" HOME="$IH13" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU9=$?
   wassert 'uninstall: without jq exits 0' test "$RCU9" -eq 0
   wassert 'uninstall: without jq still removes the files it owns' \
     bash -c "test ! -e '$IH13/.claude/hooks/orca-start-watcher.sh'"
   wassert 'uninstall: without jq leaves settings.json byte-for-byte identical' \
-    test "$(cat "$IH13/.claude/settings.json")" = "$NOJQ_BEFORE"
+    cmp -s "$INST_TMP/nojq-settings.before" "$IH13/.claude/settings.json"
   printf '%s' "$OUTU5" | grep -qF '{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh"}]}' \
     && NOJQ_TOLD=1 || NOJQ_TOLD=0
   wassert 'uninstall: without jq prints the exact entry to remove by hand' \
@@ -636,14 +639,136 @@ else
   printf 'skip: uninstall: no-jq case (could not build a PATH shim)\n'
 fi
 
-# HOME empty or unset would make every target an absolute path under / -
-# refuse before removing anything, rather than sweeping the filesystem root.
+# PIPED UNINSTALL MUST NOT INSTALL.
+#
+# `curl ... | sh -s -- --uninstall` is the documented teardown command, and
+# the piped copy is the only copy that has seen the flag. If it re-executed
+# the install.sh already at ~/.local/share/orca, any copy predating
+# --uninstall would ignore the flag and INSTALL - the teardown command doing
+# the exact opposite of what it says, in a curl | sh script. The action is
+# therefore parsed BEFORE the bootstrap block, and uninstall never re-execs.
+#
+# The stale checkout here carries a TRIPWIRE install.sh that cannot be
+# mistaken for a working one: if the bootstrap ever execs it again, it leaves
+# a marker and the case fails. No git and no network are involved.
+IHP="$INST_TMP/piped-un"; mkdir -p "$IHP/home"
+STALE="$IHP/stale"; mkdir -p "$STALE/agents"
+cp "$REPO_ROOT/agents/orca.md" "$STALE/agents/orca.md"
+printf '#!/bin/sh\ntouch "%s/EXECUTED"\nexit 0\n' "$STALE" >"$STALE/install.sh"
+chmod +x "$STALE/install.sh"
+ORCA_STYLE=claude HOME="$IHP/home" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+# ORCA_URL is deliberately bogus: if anything tries to fetch, it fails loudly
+# rather than quietly succeeding on a machine that happens to be online.
+OUTP1="$( cd "$INST_TMP" && \
+  ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$STALE" \
+  HOME="$IHP/home" sh -s -- --uninstall <"$INSTALL_SH" 2>&1 )"; RCP1=$?
+wassert 'uninstall: piped uninstall exits 0' test "$RCP1" -eq 0
+wassert 'uninstall: piped uninstall never re-execs the install.sh on disk' \
+  test ! -e "$STALE/EXECUTED"
+wassert 'uninstall: piped uninstall UNINSTALLS (does not install)' \
+  bash -c "test ! -e '$IHP/home/.claude/agents/orca.md' && test ! -L '$IHP/home/.claude/agents/orca.md'"
+wassert 'uninstall: piped uninstall unwires the hook rather than wiring it' \
+  test "$(jq '.hooks.SessionStart // [] | length' "$IHP/home/.claude/settings.json")" = 0
+# Anchored: an unanchored `wired:` also matches uninstall's own `unwired:`.
+printf '%s' "$OUTP1" | grep -qE '^ +(installed|wired):' && PIPED_INSTALLED=1 || PIPED_INSTALLED=0
+wassert 'uninstall: piped uninstall reports no install activity at all' \
+  test "$PIPED_INSTALLED" = 0
+
+# ...and with no checkout anywhere it must still not fetch one: a teardown
+# that needs the network (or git) is broken by design.
+IHP2="$INST_TMP/piped-un2"; mkdir -p "$IHP2/home"
+ORCA_STYLE=claude HOME="$IHP2/home" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+( cd "$INST_TMP" && \
+  ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$IHP2/absent" \
+  HOME="$IHP2/home" sh -s -- --uninstall <"$INSTALL_SH" >/dev/null 2>&1 ); RCP2=$?
+wassert 'uninstall: piped uninstall with no checkout exits 0' test "$RCP2" -eq 0
+wassert 'uninstall: piped uninstall clones nothing' test ! -e "$IHP2/absent"
+wassert 'uninstall: piped uninstall still removes symlinks without a checkout' \
+  bash -c "test ! -L '$IHP2/home/.claude/hooks/orca-start-watcher.sh'"
+
+# provenance, anchored: install only ever writes ABSOLUTE symlinks, so a
+# RELATIVE target cannot be one of ours. Unanchored, `./agents/orca.md`
+# resolves against the uninstaller's cwd, and the check silently degrades to
+# "am I being run from inside a checkout?" - which the documented invocation
+# always is. This case runs from $REPO_ROOT, the worst case for that bug.
+IH14="$INST_TMP/h14"; mkdir -p "$IH14/.claude/agents"
+ln -s ./agents/orca.md "$IH14/.claude/agents/orca.md"
+( cd "$REPO_ROOT" && HOME="$IH14" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1 )
+wassert 'uninstall: a RELATIVE symlink target is never ours, even from a checkout' \
+  test "$(readlink "$IH14/.claude/agents/orca.md")" = ./agents/orca.md
+
+# ...and an absolute link whose root is NOT a checkout is not ours either:
+# the root must carry agents/orca.md AND install.sh, not just the one file
+# the link happens to name.
+IH15="$INST_TMP/h15"; mkdir -p "$IH15/.claude/agents"
+FAKEROOT="$INST_TMP/fakeroot"; mkdir -p "$FAKEROOT/agents"
+cp "$REPO_ROOT/agents/orca.md" "$FAKEROOT/agents/orca.md"   # no install.sh at the root
+ln -s "$FAKEROOT/agents/orca.md" "$IH15/.claude/agents/orca.md"
+HOME="$IH15" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'uninstall: an absolute link into a NON-checkout root is not ours' \
+  test "$(readlink "$IH15/.claude/agents/orca.md")" = "$FAKEROOT/agents/orca.md"
+
+# The other half of that rule: a link into a REAL checkout that is not the
+# one uninstalling IS ours. This is the piped case (uninstall run from a
+# different copy than the install came from), so it must not need an exact
+# $ORCA_REPO match. A minimal second checkout stands in for it.
+REPO2="$INST_TMP/repo2"; mkdir -p "$REPO2/agents" "$REPO2/hooks" "$REPO2/scripts"
+cp "$INSTALL_SH" "$REPO2/install.sh"
+cp "$REPO_ROOT/agents/orca.md" "$REPO2/agents/orca.md"
+cp "$HOOKS_DIR/orca-start-watcher.sh" "$REPO2/hooks/orca-start-watcher.sh"
+cp "$WATCH_SCRIPT" "$REPO2/scripts/gh-watch.sh"
+IH16="$INST_TMP/h16"; mkdir -p "$IH16"
+ORCA_STYLE=claude HOME="$IH16" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IH16" sh "$REPO2/install.sh" --uninstall </dev/null >/dev/null 2>&1; RCU10=$?
+wassert 'uninstall: from a different checkout exits 0' test "$RCU10" -eq 0
+wassert 'uninstall: a link into ANOTHER real checkout is still ours to remove' \
+  bash -c "test ! -L '$IH16/.claude/agents/orca.md' && test ! -L '$IH16/.claude/scripts/gh-watch.sh'"
+
+# A settings.json with no orca entry must not be rewritten AT ALL - not even
+# reformatted. It has a SessionStart array (so the jq filter would happily
+# run and normalize the file) and deliberately compact formatting, which is
+# what makes the "nothing to remove -> do not touch it" short-circuit visible.
+IH17="$INST_TMP/h17"; mkdir -p "$IH17/.claude"
+printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"mine.sh"}]}]},"model":"opus"}' \
+  >"$IH17/.claude/settings.json"
+cp "$IH17/.claude/settings.json" "$INST_TMP/h17-settings.before"
+HOME="$IH17" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'uninstall: a settings.json with nothing of ours is not rewritten at all' \
+  cmp -s "$INST_TMP/h17-settings.before" "$IH17/.claude/settings.json"
+
+# Best effort, not fail-fast: one unremovable file must not abort the sweep.
+# Everything after it still gets done, what stayed is named, and the exit
+# status reports the shortfall (root bypasses mode bits, so skip there).
+IH18="$INST_TMP/h18"; mkdir -p "$IH18"
+ORCA_STYLE=claude HOME="$IH18" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+chmod 500 "$IH18/.claude/agents"
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf 'skip: uninstall: unremovable file (root bypasses mode bits)\n'
+else
+  OUTU6="$(HOME="$IH18" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU11=$?
+  wassert 'uninstall: an unremovable file exits 1, not 0' test "$RCU11" -eq 1
+  wassert 'uninstall: the sweep continues past it (later files still removed)' \
+    bash -c "test ! -e '$IH18/.claude/scripts/gh-watch.sh'"
+  wassert 'uninstall: the sweep continues past it (hook still unwired)' \
+    test "$(jq '.hooks.SessionStart // [] | length' "$IH18/.claude/settings.json")" = 0
+  printf '%s' "$OUTU6" | grep -q 'item(s) are still installed' && UN_SUMMARY=1 || UN_SUMMARY=0
+  wassert 'uninstall: reports how much was left behind' test "$UN_SUMMARY" = 1
+fi
+chmod u+rwx "$IH18/.claude/agents"
+
+# HOME empty, unset, or naming the filesystem root would make every target an
+# absolute path under / - refuse before removing anything. `/.` and `//` are
+# the same place spelled differently, and a pattern match alone misses them.
 UNOUT1="$(HOME= sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU6=$?
 wassert 'uninstall: empty HOME exits 1, removes nothing' test "$RCU6" -eq 1
 printf '%s' "$UNOUT1" | grep -q 'refusing to uninstall' && UN_REFUSED=1 || UN_REFUSED=0
 wassert 'uninstall: empty HOME says why it refused' test "$UN_REFUSED" = 1
 UNOUT2="$(env -u HOME sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU7=$?
 wassert 'uninstall: unset HOME exits 1, removes nothing' test "$RCU7" -eq 1
+for badhome in / // /. /tmp/..; do
+  HOME="$badhome" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+  wassert "uninstall: HOME=$badhome is refused (exit 1)" test "$?" -eq 1
+done
 
 # A typo'd flag must not silently fall through to installing. ORCA_STYLE is
 # set so a regression here would INSTALL (and be caught below) rather than

@@ -92,7 +92,8 @@ curl -fsSL https://raw.githubusercontent.com/iQonAi/orca/main/install.sh | sh -s
 
 It sweeps both styles in one pass, so there is no prompt, and it honours
 `CLAUDE_HOME` / `ORCA_BIN` if you set them at install time. Re-running it is
-a no-op.
+a no-op. Unlike install, it never clones, pulls, or touches the network — a
+teardown that needs the network is broken by design.
 
 Removes:
 
@@ -101,16 +102,29 @@ Removes:
   `~/.config/orca` itself, if empty)
 - the `SessionStart` entry it wired into `~/.claude/settings.json`
 
-Only if it is what the installer would have written: a symlink into an orca
-checkout at the same relative path, or — in `ORCA_MODE=copy` — a file still
-byte-identical to the repo's. A path you replaced or edited is yours; it is
-printed as `left alone: …` and kept.
+Only if it is what the installer would have written: an **absolute** symlink
+into an orca checkout at the same relative path, or — in `ORCA_MODE=copy` — a
+file still byte-identical to the repo's. A path you replaced or edited is
+yours; it is printed as `left alone: …` and kept.
+
+Piped, with no checkout on the machine, copy-mode files cannot be compared
+against anything. They are reported as `! cannot verify …` and left in place
+rather than guessed at — re-run from a checkout to finish the job.
+
+It is **best effort**: a file it cannot remove does not abort the sweep. Every
+other step still runs, anything left behind is named on the spot, and the exit
+status is non-zero if anything remains, so re-running after fixing the cause
+(a permission, a read-only mount) finishes the job.
 
 Deliberately left alone:
 
 - **Your backups.** `~/.orca-backups/<timestamp>/` is never touched or
   restored from — uninstall prints the path and you restore what you want by
-  hand.
+  hand. Automatic restore is not possible against the current backup format:
+  files are stored by basename with no record of where they came from, and
+  `AGENTS.md` does not even share a basename with its destination.
+  [#29](https://github.com/iQonAi/orca/issues/29) tracks the manifest work
+  that would make it possible.
 - **Everything else in `settings.json`.** Only entries equal to the one the
   installer wrote are dropped; other `SessionStart` entries, other hook
   types, and unrelated keys survive. An entry you merged the orca command
