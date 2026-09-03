@@ -78,6 +78,69 @@ Re-runs are idempotent. Anything replaced is backed up to
 `~/.claude/scripts/` is the home for runtime helper scripts. Do not use
 `~/.claude/jobs/` — Claude Code reserves it for background-job state.
 
+### Uninstall
+
+```sh
+./install.sh --uninstall
+```
+
+Or piped, the same way you installed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/iQonAi/orca/main/install.sh | sh -s -- --uninstall
+```
+
+It sweeps both styles in one pass, so there is no prompt, and it honours
+`CLAUDE_HOME` / `ORCA_BIN` if you set them at install time. Re-running it is
+a no-op. Unlike install, it never clones, pulls, or touches the network — a
+teardown that needs the network is broken by design.
+
+Removes:
+
+- `~/.claude/{agents/orca.md,hooks/orca-start-watcher.sh,scripts/gh-watch.sh}`
+- `~/.local/bin/gh-watch` and `~/.config/orca/AGENTS.md` (plus
+  `~/.config/orca` itself, if empty)
+- the `SessionStart` entry it wired into `~/.claude/settings.json`
+
+Only if it is what the installer would have written: an **absolute** symlink
+into an orca checkout at the same relative path, or — in `ORCA_MODE=copy` — a
+file still byte-identical to the repo's. A path you replaced or edited is
+yours; it is printed as `left alone: …` and kept.
+
+Piped, with no checkout on the machine, copy-mode files cannot be compared
+against anything. They are reported as `! cannot verify …` and left in place
+rather than guessed at — re-run from a checkout to finish the job.
+
+It is **best effort**: a file it cannot remove does not abort the sweep. Every
+other step still runs, anything left behind is named on the spot, and the exit
+status is non-zero if anything remains, so re-running after fixing the cause
+(a permission, a read-only mount) finishes the job.
+
+Deliberately left alone:
+
+- **Your backups.** `~/.orca-backups/<timestamp>/` is never touched or
+  restored from — uninstall prints the path and you restore what you want by
+  hand. Automatic restore is not possible against the current backup format:
+  files are stored by basename with no record of where they came from, and
+  `AGENTS.md` does not even share a basename with its destination.
+  [#29](https://github.com/iQonAi/orca/issues/29) tracks the manifest work
+  that would make it possible.
+- **Everything else in `settings.json`.** Only entries equal to the one the
+  installer wrote are dropped; other `SessionStart` entries, other hook
+  types, and unrelated keys survive. An entry you merged the orca command
+  *into* is not one the installer wrote, so it stays, with a note on stdout.
+  Emptied `hooks.SessionStart` / `hooks` containers are pruned; the file
+  itself is kept. (`jq` rewrites the file, so its indentation is normalized —
+  the same thing install does when it wires the hook.)
+- **Directories that are not orca's** — `~/.claude/*` and `~/.local/bin` stay
+  whatever else they hold.
+- **The checkout at `~/.local/share/orca`.** Delete it yourself if you want
+  it gone.
+
+Without `jq` it changes no JSON: it prints the exact entry to delete from
+`settings.json` by hand, mirroring what install does. With `$HOME` unset or
+empty it refuses outright rather than building paths under `/`.
+
 ## Usage
 
 From the project you want orca to manage:
