@@ -8,6 +8,19 @@ plans work, dispatches it to subagent workers in isolated git worktrees, and
 drives the resulting PRs through review to merge. You file issues; orca does
 the rest and reports a digest each cycle.
 
+> [!WARNING]
+> **Run orca on private repos only.**
+>
+> Orca treats any `@bot-handle` mention in an issue or PR comment as an
+> instruction addressed to itself, and nothing checks who wrote it. On a public
+> repo that is an unauthenticated command channel into a session holding your
+> live `gh` token, running shell commands on your machine, and merging its own
+> PRs to `main`.
+>
+> Read access is enough to comment, so even on a private repo the audience is
+> everyone with read access or better. See
+> [Safety and blast radius](#safety-and-blast-radius) before you install.
+
 ## Components
 
 | Path                          | What it is                                                                 |
@@ -92,6 +105,145 @@ it is unset.
 | 0    | Change detected, ~55min quiet expiry, or stopped by a signal — restart it. In `--status` mode: no watcher holds this repo. |
 | 1    | Could not start (no repo, unusable state dir, baseline fetch failed) — fix the cause. |
 | 3    | A watcher already holds this repo. In `--status` mode its pid is printed. `--takeover` replaces an incumbent that is not yours. |
+
+## Safety and blast radius
+
+Orca is an autonomous agent holding a live `gh` token, with write access to
+your repo and a shell on your machine. Read this before pointing it at
+anything.
+
+### Issue and PR comments are an instruction channel
+
+`agents/orca.md` defines two signals: an issue **assigned to the bot handle**
+is dispatchable work, and **any `@bot-handle` mention** in an issue or PR
+comment is "a message TO this orchestrator session; read it and dispatch/act
+accordingly" (`agents/orca.md:41-45`).
+
+Nothing checks who wrote that comment. There is no allow-list, author check, or
+trusted-commenter setting anywhere in this repo. On a public repo, every
+drive-by commenter is therefore addressing an agent that can run commands on
+your machine and merge to `main` — an unauthenticated prompt-injection channel.
+
+**Run orca on private repos only.** That shrinks the audience to people you
+have granted some access — but be precise about who that is: **read access is
+enough to comment on an issue or PR.** A private repo shared read-only with a
+contractor, an outside collaborator, or a broad org team still has this channel
+wide open. The trust boundary is everyone with read access or better, not just
+the people who can write or merge.
+
+On a public repo the audience is everyone, and you are the allow-list: read
+every incoming comment yourself.
+
+### What orca can do
+
+On your machine:
+
+- Runs `gh-watch.sh` as a long-lived background job polling GitHub every 30s
+  (`scripts/gh-watch.sh`).
+- Creates git worktrees and branches under `.claude/worktrees/`, and writes
+  scratch state under `.claude/scratch/` (`agents/orca.md:107-109`).
+- Dispatches subagent workers that edit files and run the project's
+  `build | lint | typecheck | test` commands (`agents/orca.md:113-114`).
+- **Claude-style install only:** `install.sh` symlinks (or copies) the agent,
+  hook, and watcher into `~/.claude/` and adds a `SessionStart` hook to
+  `~/.claude/settings.json` (`install.sh:78-114`). That is a global change, not
+  a per-project one: the hook is invoked on every Claude Code session start, in
+  every project. It exits immediately unless the session is the orca agent
+  (`hooks/orca-start-watcher.sh:53`) — in any other session it makes no network
+  call and spawns nothing. The agents-style install wires no hook at all
+  (`install.sh:116-124`).
+- The default install symlinks rather than copies (`ORCA_MODE=link`,
+  `install.sh:66-76`), so what runs is the clone at `~/.local/share/orca`, and
+  the piped installer fast-forwards that clone on every re-run
+  (`install.sh:21-29`). The playbook and watcher on your machine therefore
+  track upstream `main` — a later pull changes them with no reinstall and no
+  review step. `curl | sh` is an ongoing trust decision, not a one-time one;
+  `ORCA_MODE=copy` pins what you reviewed.
+
+On your repo: comments on issues, sets labels, pushes branches, opens PRs,
+posts and resolves review threads, requests reviewers, and merges its own PRs.
+
+The agent frontmatter in `agents/orca.md` sets only `name`, `description`, and
+`model`. It declares no tool restriction, so orca and its workers run with
+whatever tool permissions your Claude Code session already grants.
+
+### GitHub token scopes
+
+`install.sh` never invokes `gh` — it neither checks nor requests scopes. Orca
+uses whatever your existing `gh auth` session already has.
+
+These are the operations orca performs over a full issue-to-merge run. Only the
+first two rows are executable `gh` calls in this repo's scripts; every other row
+is a step the playbook instructs the model to take, so the "Where" column points
+at prose, not at code that enforces it.
+
+| Operation                                                        | Where                                                            | Needs                    |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------ |
+| Poll open issues every 30s — number, `updated_at`, labels only   | `scripts/gh-watch.sh:201` — `gh api repos/<repo>/issues`         | read issues              |
+| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:54`, `agents/orca.md:22` — `gh repo view`   | read repo metadata       |
+| Read issue assignees and recent comments each cycle              | `agents/orca.md:44-45`                                           | read issues              |
+| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:104-106`                                         | write issues             |
+| Push the worker branch                                           | `agents/orca.md:115`                                             | write repo contents      |
+| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:115`, `agents/orca.md:122-126`                   | write pull requests      |
+| Request an external reviewer                                     | `agents/orca.md:118` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
+| Merge the PR                                                     | `agents/orca.md:127`                                             | write contents and PRs   |
+
+Net: a classic token needs `repo`, whose private-repo access covers all of the
+above — plus `workflow` if a worker ever changes a file under
+`.github/workflows/`. A fine-grained token needs Metadata: read, Issues:
+read/write, Contents: read/write, Pull requests: read/write — plus Workflows:
+write for that same workflow-file case — scoped to the repos you want orca to
+manage, and no others.
+
+Two properties of the 30s poll are worth knowing, since it is the one piece of
+this that really is code. It requests `?state=open&per_page=50` and does not
+paginate, so only the 50 most recent open items are watched; on a busier repo,
+changes below that cut-off are missed. And GitHub's `/issues` endpoint returns
+pull requests alongside issues, so the watcher sees PR activity as well.
+
+The watcher makes roughly 120 requests per hour per repo (one poll every 30s),
+counting against your token's REST rate limit.
+
+### What gates a merge
+
+The worker lifecycle in `agents/orca.md:116-130` specifies:
+
+1. An internal review agent is spawned for every PR, checking issue completion,
+   security, maintainability, and bugs. Its findings are posted as PR review
+   comments, so they become resolvable threads.
+2. If the project's `CLAUDE.md` names an external reviewer, that reviewer is
+   requested in parallel.
+3. Orca waits for the internal review and every requested external review.
+4. Every thread must be addressed — fixed, then replied to with the fix and its
+   commit hash; or replied to with a justification. Silent resolution is
+   forbidden.
+5. Merge happens only once every thread is addressed **and none is critical**.
+6. **`on-hold` gate:** an `on-hold` label on the PR or its issue blocks merge
+   and dispatch until the label is removed or a bot-handle comment signs off.
+7. On issues, a `needs-info` label means wait; `ready-for-agent` means dispatch
+   without asking (`agents/orca.md:104-106`).
+
+**These gates are prompt instructions, not enforced code.** The executable
+files in this repo are the watcher, the SessionStart hook, the installer, and
+the test suite — none of them observe or block a merge. The gates hold exactly
+as well as the model follows its playbook.
+
+### Not verified, not implemented
+
+- **Branch protection is unverified.** Nothing in this repo reads, respects, or
+  handles branch protection rules. Orca merges with ordinary `gh` calls, so
+  GitHub's own enforcement applies to it as to any other client — but that has
+  not been tested here, and the playbook defines no handling for a merge GitHub
+  rejects. The playbook does say never to commit or merge local `main`
+  (`agents/orca.md:115`); work always goes through a branch and a PR.
+- **There is no dry-run or approval mode.** No flag, environment variable, or
+  setting in this repo makes orca plan without acting, or ask before it
+  comments, pushes, or merges. Once running, it acts on its own.
+- **Token cost per cycle is unmeasured.** Every watcher exit re-invokes the
+  model, and the poll cadence adapts between 60s and ~1800s depending on
+  activity (`agents/orca.md:54-57`), so cost scales with how busy the repo is.
+  No measured figure is available; tracked in
+  [#23](https://github.com/iQonAi/orca/issues/23).
 
 ## Tests
 
