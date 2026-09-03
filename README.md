@@ -10,12 +10,16 @@ the rest and reports a digest each cycle.
 
 > [!WARNING]
 > **Run orca on private repos only.**
+>
 > Orca treats any `@bot-handle` mention in an issue or PR comment as an
-> instruction addressed to itself. Nothing checks who wrote the comment. On a
-> public repo that is an unauthenticated command channel into a session holding
-> your live `gh` token, running shell commands on your machine, and merging its
-> own PRs to `main`. See [Safety and blast radius](#safety-and-blast-radius)
-> before you install.
+> instruction addressed to itself, and nothing checks who wrote it. On a public
+> repo that is an unauthenticated command channel into a session holding your
+> live `gh` token, running shell commands on your machine, and merging its own
+> PRs to `main`.
+>
+> Read access is enough to comment, so even on a private repo the audience is
+> everyone with read access or better. See
+> [Safety and blast radius](#safety-and-blast-radius) before you install.
 
 ## Components
 
@@ -120,9 +124,15 @@ trusted-commenter setting anywhere in this repo. On a public repo, every
 drive-by commenter is therefore addressing an agent that can run commands on
 your machine and merge to `main` — an unauthenticated prompt-injection channel.
 
-**Run orca on private repos only**, where the people who can comment are
-already the people you trust with write access. If you run it on a public repo,
-you are the allow-list: read every incoming comment yourself.
+**Run orca on private repos only.** That shrinks the audience to people you
+have granted some access — but be precise about who that is: **read access is
+enough to comment on an issue or PR.** A private repo shared read-only with a
+contractor, an outside collaborator, or a broad org team still has this channel
+wide open. The trust boundary is everyone with read access or better, not just
+the people who can write or merge.
+
+On a public repo the audience is everyone, and you are the allow-list: read
+every incoming comment yourself.
 
 ### What orca can do
 
@@ -134,10 +144,14 @@ On your machine:
   scratch state under `.claude/scratch/` (`agents/orca.md:107-109`).
 - Dispatches subagent workers that edit files and run the project's
   `build | lint | typecheck | test` commands (`agents/orca.md:113-114`).
-- `install.sh` symlinks (or copies) the agent, hook, and watcher into
-  `~/.claude/` and adds a `SessionStart` hook to `~/.claude/settings.json`
-  (`install.sh:78-114`). That hook then runs on every Claude Code session
-  start, in every project — not just the one you installed from.
+- **Claude-style install only:** `install.sh` symlinks (or copies) the agent,
+  hook, and watcher into `~/.claude/` and adds a `SessionStart` hook to
+  `~/.claude/settings.json` (`install.sh:78-114`). That is a global change, not
+  a per-project one: the hook is invoked on every Claude Code session start, in
+  every project. It exits immediately unless the session is the orca agent
+  (`hooks/orca-start-watcher.sh:53`) — in any other session it makes no network
+  call and spawns nothing. The agents-style install wires no hook at all
+  (`install.sh:116-124`).
 
 On your repo: comments on issues, sets labels, pushes branches, opens PRs,
 posts and resolves review threads, requests reviewers, and merges its own PRs.
@@ -149,26 +163,36 @@ whatever tool permissions your Claude Code session already grants.
 ### GitHub token scopes
 
 `install.sh` never invokes `gh` — it neither checks nor requests scopes. Orca
-uses whatever your existing `gh auth` session already has. These are the
-operations the code actually performs:
+uses whatever your existing `gh auth` session already has.
+
+These are the operations orca performs over a full issue-to-merge run. Only the
+first two rows are executable `gh` calls in this repo's scripts; every other row
+is a step the playbook instructs the model to take, so the "Where" column points
+at prose, not at code that enforces it.
 
 | Operation                                                        | Where                                                            | Needs                    |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------ |
-| Poll open issues (number, `updated_at`, labels) every 30s        | `scripts/gh-watch.sh:201` — `gh api repos/<repo>/issues`         | read issues              |
+| Poll open issues every 30s — number, `updated_at`, labels only   | `scripts/gh-watch.sh:201` — `gh api repos/<repo>/issues`         | read issues              |
 | Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:54`, `agents/orca.md:22` — `gh repo view`   | read repo metadata       |
 | Read issue assignees and recent comments each cycle              | `agents/orca.md:44-45`                                           | read issues              |
 | Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:104-106`                                         | write issues             |
 | Push the worker branch                                           | `agents/orca.md:115`                                             | write repo contents      |
-| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:115`, `agents/orca.md:124-126`                   | write pull requests      |
+| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:115`, `agents/orca.md:122-126`                   | write pull requests      |
 | Request an external reviewer                                     | `agents/orca.md:118` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
 | Merge the PR                                                     | `agents/orca.md:127`                                             | write contents and PRs   |
 
 Net: a classic token needs `repo`, whose private-repo access covers all of the
-above. A fine-grained token needs Metadata: read, Issues: read/write, Contents:
-read/write, Pull requests: read/write — scoped to the repos you want orca to
-manage, and no others. If a worker ever changes a file under
-`.github/workflows/`, GitHub additionally requires the `workflow` scope for
-that push.
+above — plus `workflow` if a worker ever changes a file under
+`.github/workflows/`. A fine-grained token needs Metadata: read, Issues:
+read/write, Contents: read/write, Pull requests: read/write — plus Workflows:
+write for that same workflow-file case — scoped to the repos you want orca to
+manage, and no others.
+
+Two properties of the 30s poll are worth knowing, since it is the one piece of
+this that really is code. It requests `?state=open&per_page=50` and does not
+paginate, so only the 50 most recent open items are watched; on a busier repo,
+changes below that cut-off are missed. And GitHub's `/issues` endpoint returns
+pull requests alongside issues, so the watcher sees PR activity as well.
 
 The watcher makes roughly 120 requests per hour per repo (one poll every 30s),
 counting against your token's REST rate limit.
@@ -211,7 +235,8 @@ as well as the model follows its playbook.
 - **Token cost per cycle is unmeasured.** Every watcher exit re-invokes the
   model, and the poll cadence adapts between 60s and ~1800s depending on
   activity (`agents/orca.md:54-57`), so cost scales with how busy the repo is.
-  No measured figure is available.
+  No measured figure is available; tracked in
+  [#23](https://github.com/iQonAi/orca/issues/23).
 
 ## Tests
 
