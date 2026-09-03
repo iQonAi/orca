@@ -18,9 +18,14 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
    # Piped (or stray copy): bootstrap durable checkout, then re-execute from it.
    ORCA_REPO="${ORCA_REPO:-$HOME/.local/share/orca}"
    # A quoted ORCA_REPO="~/x" reaches us with a literal tilde - expand it.
-   # SC2088: the tildes in this block are the thing being MATCHED and STRIPPED
-   # (a literal `~` the shell never got to expand), not paths we want expanded.
-   # $HOME does the expanding here, which is exactly what SC2088 asks for.
+   # SC2088 fires on the `"~"` and `"~/"*` case PATTERNS. It is spurious there:
+   # a pattern is only ever matched against, never expanded, so there is no
+   # expansion to fix. It sits on the `case` and not on the one branch because
+   # ShellCheck rejects branch-level directives outright (SC1124).
+   # This is NOT a clean bill of health for the branch bodies: `${ORCA_REPO#~/}`
+   # below tilde-expands its own strip pattern, so it never strips the literal
+   # `~/`. That bug is real and pre-existing - tracked in #24, and fixed there
+   # with regression coverage, not by widening this directive.
    # shellcheck disable=SC2088
    case "$ORCA_REPO" in
        "~") ORCA_REPO="$HOME" ;;
