@@ -467,7 +467,9 @@ if command -v git >/dev/null 2>&1; then
     test -f "$TH1/home/clone/agents/orca.md"
   wassert 'install: ORCA_REPO="~/x" left no literal ~ segment on disk' \
     test ! -e "$TH1/home/~"
-  printf '%s' "$OUTT1" | grep -qx "Installing orca (claude style) from $TH1/home/clone" \
+  # -F: the expected line interpolates a mktemp path (`tmp.XXXXXXXXXX`), so
+  # without it the `.` is a live BRE metacharacter, not a literal.
+  printf '%s' "$OUTT1" | grep -qxF "Installing orca (claude style) from $TH1/home/clone" \
     && T1_RESOLVED=1 || T1_RESOLVED=0
   wassert 'install: ORCA_REPO="~/x" resolved to $HOME/x, tilde expanded' \
     test "$T1_RESOLVED" = 1
@@ -482,7 +484,7 @@ if command -v git >/dev/null 2>&1; then
     test -f "$TH2/home/agents/orca.md"
   wassert 'install: ORCA_REPO="~" left no literal ~ segment on disk' \
     test ! -e "$TH2/home/~"
-  printf '%s' "$OUTT2" | grep -qx "Installing orca (claude style) from $TH2/home" \
+  printf '%s' "$OUTT2" | grep -qxF "Installing orca (claude style) from $TH2/home" \
     && T2_RESOLVED=1 || T2_RESOLVED=0
   wassert 'install: ORCA_REPO="~" resolved to $HOME, tilde expanded' \
     test "$T2_RESOLVED" = 1
