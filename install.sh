@@ -8,12 +8,20 @@ ORCA_URL="${ORCA_URL:-https://github.com/iQonAi/orca.git}"
 # contain agents/orca.md hijack the install source.
 script_dir=
 if [ -f "$0" ]; then
+   # SC1007: `CDPATH=` is a deliberate env prefix scoped to this one `cd`, not a
+   # botched assignment - it stops a user's CDPATH from making `cd` land (and
+   # print) somewhere else. The space after `=` is what the idiom requires.
+   # shellcheck disable=SC1007
    script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || script_dir=
 fi
 if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
    # Piped (or stray copy): bootstrap durable checkout, then re-execute from it.
    ORCA_REPO="${ORCA_REPO:-$HOME/.local/share/orca}"
    # A quoted ORCA_REPO="~/x" reaches us with a literal tilde - expand it.
+   # SC2088: the tildes in this block are the thing being MATCHED and STRIPPED
+   # (a literal `~` the shell never got to expand), not paths we want expanded.
+   # $HOME does the expanding here, which is exactly what SC2088 asks for.
+   # shellcheck disable=SC2088
    case "$ORCA_REPO" in
        "~") ORCA_REPO="$HOME" ;;
        "~/"*) ORCA_REPO="$HOME/${ORCA_REPO#~/}" ;;
@@ -89,6 +97,10 @@ wire_claude_hook() {
     # against) ones written by hand or by older installers; a custom
     # CLAUDE_HOME must be spelled out or the wired path points at nothing.
     if [ "$CH" = "$HOME/.claude" ]; then
+        # SC2088: the tilde must survive UNEXPANDED - this string is written
+        # into settings.json for the harness to read, and the `~` form is what
+        # makes the entry dedupe against hand-written ones (see comment above).
+        # shellcheck disable=SC2088
         hook_cmd='~/.claude/hooks/orca-start-watcher.sh'
     else
         hook_cmd="$CH/hooks/orca-start-watcher.sh"

@@ -188,6 +188,10 @@ fi
 # the sleep and `wait`ing on it makes the trap run at once; release kills the
 # sleep so it is not left behind.
 sleep_pid=""
+# SC2317: this body is unreachable only to a static reader - it is invoked
+# indirectly by the EXIT/INT/TERM/HUP traps installed immediately below, which
+# ShellCheck does not trace back to the function.
+# shellcheck disable=SC2317
 release() {
   [ -n "$sleep_pid" ] && kill "$sleep_pid" 2>/dev/null
   [ "$(cat "$pidfile" 2>/dev/null)" = "$$" ] && rm -f "$pidfile"
@@ -204,7 +208,7 @@ snapshot() {
 base=$(snapshot) || base=""
 [ -z "$base" ] && { echo "baseline fetch failed for $repo"; exit 1; }
 echo "watching $repo (baseline captured $(date +%H:%M:%S))"
-for i in $(seq 1 110); do
+for _ in $(seq 1 110); do
   sleep 30 & sleep_pid=$!
   wait "$sleep_pid" 2>/dev/null
   sleep_pid=""
