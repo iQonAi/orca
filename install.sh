@@ -22,14 +22,14 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
    # a pattern is only ever matched against, never expanded, so there is no
    # expansion to fix. It sits on the `case` and not on the one branch because
    # ShellCheck rejects branch-level directives outright (SC1124).
-   # This is NOT a clean bill of health for the branch bodies: `${ORCA_REPO#~/}`
-   # below tilde-expands its own strip pattern, so it never strips the literal
-   # `~/`. That bug is real and pre-existing - tracked in #24, and fixed there
-   # with regression coverage, not by widening this directive.
+   # The strip pattern in the second branch is quoted for the same reason the
+   # patterns are: unquoted, `${ORCA_REPO#~/}` tilde-expands its OWN pattern to
+   # `$HOME/`, never strips the literal `~/`, and resolves "~/x" to "$HOME/~/x"
+   # - a directory literally named `~`. That was #24; test/run.sh now covers it.
    # shellcheck disable=SC2088
    case "$ORCA_REPO" in
        "~") ORCA_REPO="$HOME" ;;
-       "~/"*) ORCA_REPO="$HOME/${ORCA_REPO#~/}" ;;
+       "~/"*) ORCA_REPO="$HOME/${ORCA_REPO#"~/"}" ;;
    esac
    if [ ! -f "$ORCA_REPO/agents/orca.md" ]; then
        command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }

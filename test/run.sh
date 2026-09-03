@@ -372,6 +372,10 @@ wassert 'install: hook and watcher installed' \
   bash -c "test -e '$IH1/.claude/hooks/orca-start-watcher.sh' && test -e '$IH1/.claude/scripts/gh-watch.sh'"
 wassert 'install: SessionStart hook wired exactly once' \
   test "$(jq '.hooks.SessionStart | length' "$IH1/.claude/settings.json")" = 1
+# The default install writes the ~ form UNEXPANDED, so the entry dedupes against
+# hand-written ones; an expanded absolute path here would defeat that.
+wassert 'install: default CLAUDE_HOME wires the literal ~ form, unexpanded' \
+  test "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$IH1/.claude/settings.json")" = '~/.claude/hooks/orca-start-watcher.sh'
 printf '%s' "$OUT1" | grep -q 'backup:' && FRESH_BACKUP=1 || FRESH_BACKUP=0
 wassert 'install: fresh install makes no backups' test "$FRESH_BACKUP" = 0
 
@@ -446,6 +450,44 @@ if command -v git >/dev/null 2>&1; then
     bash -c "readlink '$BOOT/home/.claude/agents/orca.md' | grep -q '^$BOOT/clone/'"
 else
   printf 'skip: install: piped bootstrap (git unavailable)\n'
+fi
+
+# literal-tilde ORCA_REPO: a QUOTED ORCA_REPO="~/x" reaches install.sh with the
+# tilde unexpanded, so install.sh expands it itself. Regression for #24, where
+# the strip pattern was itself tilde-expanded and "~/x" resolved to "$HOME/~/x"
+# - cloning into a directory literally named `~` inside the user's home. Only
+# the piped path reaches that code, so these drive it the same way as above.
+if command -v git >/dev/null 2>&1; then
+  TH1="$INST_TMP/tilde-slash"; mkdir -p "$TH1/home"
+  OUTT1="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$REPO_ROOT" ORCA_REPO='~/clone' ORCA_STYLE=claude \
+    HOME="$TH1/home" sh <"$INSTALL_SH" 2>&1 )"; RCT1=$?
+  wassert 'install: ORCA_REPO="~/x" exits 0' test "$RCT1" -eq 0
+  wassert 'install: ORCA_REPO="~/x" cloned to $HOME/x' \
+    test -f "$TH1/home/clone/agents/orca.md"
+  wassert 'install: ORCA_REPO="~/x" left no literal ~ segment on disk' \
+    test ! -e "$TH1/home/~"
+  printf '%s' "$OUTT1" | grep -qx "Installing orca (claude style) from $TH1/home/clone" \
+    && T1_RESOLVED=1 || T1_RESOLVED=0
+  wassert 'install: ORCA_REPO="~/x" resolved to $HOME/x, tilde expanded' \
+    test "$T1_RESOLVED" = 1
+
+  # the bare `~` form resolves to $HOME itself
+  TH2="$INST_TMP/tilde-bare"; mkdir -p "$TH2/home"
+  OUTT2="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$REPO_ROOT" ORCA_REPO='~' ORCA_STYLE=claude \
+    HOME="$TH2/home" sh <"$INSTALL_SH" 2>&1 )"; RCT2=$?
+  wassert 'install: ORCA_REPO="~" exits 0' test "$RCT2" -eq 0
+  wassert 'install: ORCA_REPO="~" cloned into $HOME itself' \
+    test -f "$TH2/home/agents/orca.md"
+  wassert 'install: ORCA_REPO="~" left no literal ~ segment on disk' \
+    test ! -e "$TH2/home/~"
+  printf '%s' "$OUTT2" | grep -qx "Installing orca (claude style) from $TH2/home" \
+    && T2_RESOLVED=1 || T2_RESOLVED=0
+  wassert 'install: ORCA_REPO="~" resolved to $HOME, tilde expanded' \
+    test "$T2_RESOLVED" = 1
+else
+  printf 'skip: install: literal-tilde ORCA_REPO (git unavailable)\n'
 fi
 
 # ---------------------------------------------------------------------------
