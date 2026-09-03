@@ -68,6 +68,7 @@ Environment overrides:
 | ------------- | ---------------------- | ---------------------------------------------- |
 | `ORCA_STYLE`  | (prompt)               | `claude` or `agents`; skips the prompt. With no tty, an existing `~/.claude` selects claude, otherwise the script exits 2 |
 | `ORCA_REPO`   | `~/.local/share/orca`  | where the piped install clones the repo        |
+| `ORCA_REF`    | `v0.1.0`               | the release tag the piped install checks out, and moves an existing clone to on re-run; `ORCA_REF=main` for development |
 | `ORCA_MODE`   | `link`                 | `copy` to copy files instead of symlinking     |
 | `CLAUDE_HOME` | `~/.claude`            | claude-style destination                       |
 | `ORCA_BIN`    | `~/.local/bin`         | agents-style watcher destination               |
