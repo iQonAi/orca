@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      # test/run.sh hard-fails without jq (it wires the SessionStart hook and
+      # asserts on settings.json). git, setsid and pgrep — also required by the
+      # suite — are already present on ubuntu-latest.
+      - name: Install jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      # Hermetic: temp HOMEs, temp git repos, a stub `gh` on PATH and
+      # GH_WATCH_STATE_DIR keep it off the network and off any real state.
+      - name: Run test suite
+        run: bash test/run.sh
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck --version
+
+      - name: shellcheck
+        run: |
+          shellcheck \
+            install.sh \
+            scripts/gh-watch.sh \
+            hooks/orca-start-watcher.sh
+
+  # Its own job, not a step next to shellcheck: a failing step aborts the rest
+  # of its job, so sharing one job would hide this diff whenever shellcheck is
+  # red — exactly when someone is most likely to be reading the logs.
+  shfmt:
+    name: shfmt
+    runs-on: ubuntu-latest
+    env:
+      SHFMT_VERSION: v3.14.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Install shfmt
+        run: |
+          curl -fsSL -o /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          chmod +x /tmp/shfmt
+          sudo mv /tmp/shfmt /usr/local/bin/shfmt
+          shfmt --version
+
+      # NON-BLOCKING for now: the shell files are not yet formatted — indentation
+      # is currently a mix of 1/2/3/4/6/7/8/9/11 spaces. Issue #18 normalizes it.
+      # Once #18 lands, drop `continue-on-error` (and pin the style flags #18
+      # settles on, e.g. `-i 2`) to make this a real gate.
+      - name: shfmt -d (non-blocking until #18)
+        continue-on-error: true
+        run: |
+          shfmt -d \
+            install.sh \
+            scripts/gh-watch.sh \
+            hooks/orca-start-watcher.sh \
+            test/run.sh
