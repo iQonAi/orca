@@ -44,6 +44,16 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
 fi
 ORCA_REPO="$script_dir"
 
+ACTION=install
+for arg in "$@"; do
+    case "$arg" in
+        --uninstall) ACTION=uninstall ;;
+        # Rejected rather than ignored: a typo'd flag must not silently run
+        # the opposite action of the one that was asked for.
+        *) echo "unrecognized option: $arg" >&2; exit 2 ;;
+    esac
+done
+
 resolve_style() {
     case "${ORCA_STYLE:-}" in claude|agents) STYLE=$ORCA_STYLE; return 0 ;; esac
     if [ -e /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
@@ -139,6 +149,148 @@ install_agents() {
     echo "  note: the SessionStart autostart hook is Claude-specific and was not installed;"
     echo "        launch 'gh-watch <owner>/<repo>' yourself per the playbook."
 }
+
+# --- uninstall ---------------------------------------------------------------
+#
+# Reverses what this installer creates, and nothing else. Every path is
+# provenance-checked before it is touched: anything that is not what the
+# installer would have written is the user's, and is reported instead of
+# removed. Both styles are swept on every run - each path is checked on its
+# own merits, so uninstall needs no style prompt and is idempotent.
+
+installer_made() { # $1 dst, $2 source path inside the repo
+    if [ -L "$1" ]; then
+        # link mode: ours only if it points at <an orca checkout>/$2. The
+        # exact-$ORCA_REPO case is the normal install; the suffix case lets a
+        # piped uninstall (which clones its own copy) still recognize a link
+        # made from a different checkout, without accepting a link that merely
+        # happens to sit at this path.
+        target=$(readlink "$1")
+        case "$target" in
+            "$ORCA_REPO/$2") return 0 ;;
+            */"$2")
+                root=${target%"/$2"}
+                if [ -f "$root/agents/orca.md" ] && [ -f "$root/install.sh" ]; then
+                    return 0
+                fi
+                return 1 ;;
+        esac
+        return 1
+    fi
+    # copy mode: ours only if byte-identical to the source it was copied from.
+    # A file the user wrote or edited is theirs and stays.
+    [ -f "$1" ] || return 1
+    cmp -s "$ORCA_REPO/$2" "$1" 2>/dev/null
+}
+
+remove_installed() { # $1 dst, $2 source path inside the repo
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    if installer_made "$1" "$2"; then
+        rm -f "$1"
+        echo "    removed: $1"
+    else
+        echo "    left alone: $1 (not what the installer creates - yours, or edited)"
+    fi
+}
+
+unwire_claude_hook() {
+    if [ "$CH" = "$HOME/.claude" ]; then
+        # SC2088: same as wire_claude_hook - this tilde is data written into
+        # settings.json, not a path to expand. It must match byte-for-byte
+        # what the installer wired, or the entry is not found and not removed.
+        # shellcheck disable=SC2088
+        hook_cmd='~/.claude/hooks/orca-start-watcher.sh'
+    else
+        hook_cmd="$CH/hooks/orca-start-watcher.sh"
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "    ! jq not found - remove this from $1 under hooks.SessionStart yourself:"
+        echo "    {\"hooks\":[{\"type\":\"command\",\"command\":\"$hook_cmd\"}]}"
+        return 0
+    fi
+    [ -f "$1" ] || return 0
+    # A default install drops both spellings: the ~ form it writes, and the
+    # expanded form a hand-edit may carry. A custom CLAUDE_HOME drops only its
+    # own absolute form, so tearing it down never unwires a separate default
+    # install that is still in place.
+    if [ "$CH" = "$HOME/.claude" ]; then
+        drop=$(jq -nc --arg a "$hook_cmd" --arg b "$CH/hooks/orca-start-watcher.sh" \
+            '[$a,$b] | unique | map({hooks:[{type:"command",command:.}]})')
+    else
+        drop=$(jq -nc --arg a "$hook_cmd" '[{hooks:[{type:"command",command:$a}]}]')
+    fi
+    n=$(jq --argjson d "$drop" \
+        '[(.hooks.SessionStart // [])[] | select(. as $e | $d | index($e))] | length' "$1" 2>/dev/null) \
+        || { echo "    ! $1 is not valid JSON - left as-is"; return 0; }
+    if [ "$n" = 0 ]; then
+        # Nothing of ours in there: do not rewrite the file at all, so an
+        # untouched settings.json keeps its own formatting byte-for-byte.
+        echo "    ok: no orca SessionStart entry in $1"
+    else
+        tmp=$(mktemp)
+        # Surgical: drop only entries equal to what the installer writes, then
+        # clean up the containers that leaves empty. Every other key, hook and
+        # entry is carried through by jq untouched.
+        if jq --argjson d "$drop" '
+              .hooks.SessionStart |= map(select(. as $e | $d | index($e) | not))
+              | if (.hooks.SessionStart | length) == 0 then del(.hooks.SessionStart) else . end
+              | if (.hooks | length) == 0 then del(.hooks) else . end
+            ' "$1" > "$tmp" && mv "$tmp" "$1"; then
+            echo "    unwired: SessionStart hook in $1"
+        else
+            rm -f "$tmp"
+            echo "    ! could not rewrite $1 - left as-is"
+            return 0
+        fi
+    fi
+    # An entry the user merged our command INTO is not one we wrote, so it is
+    # not removed - but say so rather than leaving a silent leftover.
+    if jq -e '[(.hooks.SessionStart // [])[] | tostring
+               | select(contains("orca-start-watcher"))] | length > 0' "$1" >/dev/null 2>&1; then
+        echo "    note: another SessionStart entry in $1 still references orca-start-watcher.sh; left as-is"
+    fi
+}
+
+uninstall_claude() {
+    CH="${CLAUDE_HOME:-$HOME/.claude}"
+    remove_installed "$CH/agents/orca.md"                agents/orca.md
+    remove_installed "$CH/hooks/orca-start-watcher.sh"   hooks/orca-start-watcher.sh
+    remove_installed "$CH/scripts/gh-watch.sh"           scripts/gh-watch.sh
+    unwire_claude_hook "$CH/settings.json"
+}
+
+uninstall_agents() {
+    BIN="${ORCA_BIN:-$HOME/.local/bin}"
+    remove_installed "$BIN/gh-watch"                  scripts/gh-watch.sh
+    remove_installed "$HOME/.config/orca/AGENTS.md"   agents/orca.md
+    # Only this directory is orca's own; ~/.claude/* and ~/.local/bin belong to
+    # the user. rmdir (never rm -r) so a non-empty one is left standing.
+    rmdir "$HOME/.config/orca" 2>/dev/null || true
+}
+
+uninstall() {
+    # Every path below is built from $HOME. An unset or empty HOME would make
+    # them absolute paths under /, so refuse before anything is removed.
+    case "${HOME:-}" in
+        ""|/) echo "refusing to uninstall: HOME is unset, empty, or /" >&2; exit 1 ;;
+    esac
+    [ -d "$HOME" ] || { echo "refusing to uninstall: HOME ($HOME) is not a directory" >&2; exit 1; }
+    echo "Uninstalling orca (comparing against $ORCA_REPO)"
+    echo "  claude style:"
+    uninstall_claude
+    echo "  agents style:"
+    uninstall_agents
+    if [ -d "$HOME/.orca-backups" ]; then
+        echo "  note: files the installer replaced are still in $HOME/.orca-backups/"
+        echo "        (untouched by uninstall - restore the ones you want by hand)."
+    fi
+    echo "done."
+}
+
+if [ "$ACTION" = uninstall ]; then
+    uninstall
+    exit 0
+fi
 
 resolve_style
 echo "Installing orca ($STYLE style) from $ORCA_REPO"

@@ -493,6 +493,170 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# install.sh --uninstall — reverses the install, and only the install
+#
+# The whole point of these cases is the boundary between "the installer made
+# this" and "the user made this". Uninstall removes a path only when it is a
+# symlink into an orca checkout at the installer's own relative path, or a
+# regular file byte-identical to the source it was copied from. Anything else
+# is reported on stdout and left standing, so every case below that plants a
+# user-owned file asserts the file is still there afterwards.
+
+# claude style: install, then uninstall, leaves nothing of orca's
+IH6="$INST_TMP/h6"; mkdir -p "$IH6"
+ORCA_STYLE=claude HOME="$IH6" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+OUTU1="$(HOME="$IH6" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU1=$?
+wassert 'uninstall: claude style exits 0' test "$RCU1" -eq 0
+# -e is false for a DANGLING symlink, so -L is asserted too: a link left
+# pointing at a removed checkout would otherwise read as "gone".
+wassert 'uninstall: every installed file is gone, with no dangling link left' \
+  bash -c "for f in agents/orca.md hooks/orca-start-watcher.sh scripts/gh-watch.sh; do
+             test ! -e '$IH6/.claude'/\$f || exit 1; test ! -L '$IH6/.claude'/\$f || exit 1
+           done"
+wassert 'uninstall: the SessionStart hook is unwired' \
+  test "$(jq '.hooks.SessionStart // [] | length' "$IH6/.claude/settings.json")" = 0
+wassert 'uninstall: settings.json keeps no trace of orca' \
+  bash -c "! grep -q orca '$IH6/.claude/settings.json'"
+
+# running it twice must be a clean no-op, not an error
+OUTU2="$(HOME="$IH6" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU2=$?
+wassert 'uninstall: rerun exits 0' test "$RCU2" -eq 0
+printf '%s' "$OUTU2" | grep -qE 'removed:|left alone:' && UN_RERUN_CHANGED=1 || UN_RERUN_CHANGED=0
+wassert 'uninstall: rerun touches nothing (idempotent)' test "$UN_RERUN_CHANGED" = 0
+
+# a settings.json the user already had: orca's entry goes, everything else -
+# other SessionStart entries, other hook types, unrelated top-level keys -
+# survives with its values intact.
+IH7="$INST_TMP/h7"; mkdir -p "$IH7/.claude"
+cat >"$IH7/.claude/settings.json" <<'JSON'
+{
+  "model": "opus",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "~/.claude/hooks/mine.sh" } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash", "hooks": [ { "type": "command", "command": "guard.sh" } ] }
+    ]
+  }
+}
+JSON
+PRE7="$(jq -Sc 'del(.hooks.SessionStart)' "$IH7/.claude/settings.json")"
+ORCA_STYLE=claude HOME="$IH7" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'uninstall: (setup) install wired orca alongside the user entry' \
+  test "$(jq '.hooks.SessionStart | length' "$IH7/.claude/settings.json")" = 2
+HOME="$IH7" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'uninstall: the user own SessionStart entry survives intact' \
+  test "$(jq -c '.hooks.SessionStart' "$IH7/.claude/settings.json")" = '[{"hooks":[{"type":"command","command":"~/.claude/hooks/mine.sh"}]}]'
+wassert 'uninstall: unrelated keys and other hook types survive intact' \
+  test "$(jq -Sc 'del(.hooks.SessionStart)' "$IH7/.claude/settings.json")" = "$PRE7"
+wassert 'uninstall: no orca entry is left in a shared settings.json' \
+  bash -c "! grep -q orca-start-watcher '$IH7/.claude/settings.json'"
+
+# user-owned content sitting at install paths: an edited copy and a symlink
+# pointing somewhere that is not an orca checkout. Neither is ours to delete.
+IH8="$INST_TMP/h8"; mkdir -p "$IH8"
+ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH8" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+printf 'my own agent\n' >"$IH8/.claude/agents/orca.md"
+rm -f "$IH8/.claude/scripts/gh-watch.sh"
+ln -s /dev/null "$IH8/.claude/scripts/gh-watch.sh"
+OUTU3="$(HOME="$IH8" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU3=$?
+wassert 'uninstall: exits 0 with user-owned files at install paths' test "$RCU3" -eq 0
+wassert 'uninstall: a user-edited file at an install path is NOT removed' \
+  bash -c "grep -q 'my own agent' '$IH8/.claude/agents/orca.md'"
+wassert 'uninstall: a symlink pointing outside an orca checkout is NOT removed' \
+  test "$(readlink "$IH8/.claude/scripts/gh-watch.sh")" = /dev/null
+printf '%s' "$OUTU3" | grep -q "left alone: $IH8/.claude/agents/orca.md" \
+  && UN_SAID_LEFT=1 || UN_SAID_LEFT=0
+wassert 'uninstall: names on stdout what it left alone' test "$UN_SAID_LEFT" = 1
+# same run, same directory: a copy-mode file still byte-identical to the
+# source IS ours, and goes. Provenance is per path, not per run.
+wassert 'uninstall: an untouched copy-mode file is still removed' \
+  bash -c "test ! -e '$IH8/.claude/hooks/orca-start-watcher.sh'"
+
+# agents style: the watcher, the playbook, and orca's own ~/.config/orca dir
+IH9="$INST_TMP/h9"; mkdir -p "$IH9"
+ORCA_STYLE=agents HOME="$IH9" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IH9" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU4=$?
+wassert 'uninstall: agents style exits 0' test "$RCU4" -eq 0
+wassert 'uninstall: agents style removes the watcher and the playbook' \
+  bash -c "test ! -e '$IH9/.local/bin/gh-watch' && test ! -e '$IH9/.config/orca/AGENTS.md'"
+# rmdir, not rm -r: ~/.config/orca is orca's own, and only if left empty.
+wassert 'uninstall: agents style removes its own empty ~/.config/orca' \
+  test ! -d "$IH9/.config/orca"
+wassert 'uninstall: agents style leaves ~/.local/bin standing' test -d "$IH9/.local/bin"
+
+# custom CLAUDE_HOME: torn down where it was installed, not at ~/.claude
+IH10="$INST_TMP/h10"; CH10="$INST_TMP/ch10"; mkdir -p "$IH10"
+ORCA_STYLE=claude HOME="$IH10" CLAUDE_HOME="$CH10" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IH10" CLAUDE_HOME="$CH10" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU5=$?
+wassert 'uninstall: custom CLAUDE_HOME exits 0' test "$RCU5" -eq 0
+wassert 'uninstall: custom CLAUDE_HOME files are removed' \
+  bash -c "test ! -e '$CH10/agents/orca.md' && test ! -e '$CH10/hooks/orca-start-watcher.sh'"
+wassert 'uninstall: custom CLAUDE_HOME settings.json is unwired' \
+  test "$(jq '.hooks.SessionStart // [] | length' "$CH10/settings.json")" = 0
+
+# backups are the user's escape hatch: uninstall points at them, never
+# restores blind (which run's backup would it even pick?) and never deletes.
+IH11="$INST_TMP/h11"; mkdir -p "$IH11/.claude/agents"
+printf 'previous agent\n' >"$IH11/.claude/agents/orca.md"
+ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH11" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+OUTU4="$(HOME="$IH11" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+wassert 'uninstall: the pre-install backup is still on disk afterwards' \
+  bash -c "grep -q 'previous agent' '$IH11'/.orca-backups/*/orca.md"
+printf '%s' "$OUTU4" | grep -q '.orca-backups' && UN_BACKUP_NOTE=1 || UN_BACKUP_NOTE=0
+wassert 'uninstall: points at the backup dir instead of restoring blind' \
+  test "$UN_BACKUP_NOTE" = 1
+
+# Without jq, uninstall must change no JSON at all: it prints the entry to
+# delete by hand, exactly as install prints the entry to add by hand. Editing
+# settings.json with sed/grep guesswork would be worse than not editing it.
+# The suite itself needs jq, so jq is hidden with a PATH shim holding only the
+# tools the uninstall path uses.
+IH13="$INST_TMP/h13"; mkdir -p "$IH13"
+NOJQ_BIN="$INST_TMP/nojq-bin"; mkdir -p "$NOJQ_BIN"
+NOJQ_OK=1
+for t in sh dirname readlink cmp rm rmdir mktemp date mkdir ln cp; do
+  p="$(command -v "$t")" && ln -s "$p" "$NOJQ_BIN/$t" || NOJQ_OK=0
+done
+if [[ "$NOJQ_OK" == 1 ]]; then
+  ORCA_STYLE=claude HOME="$IH13" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+  NOJQ_BEFORE="$(cat "$IH13/.claude/settings.json")"
+  OUTU5="$(env -i PATH="$NOJQ_BIN" HOME="$IH13" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU9=$?
+  wassert 'uninstall: without jq exits 0' test "$RCU9" -eq 0
+  wassert 'uninstall: without jq still removes the files it owns' \
+    bash -c "test ! -e '$IH13/.claude/hooks/orca-start-watcher.sh'"
+  wassert 'uninstall: without jq leaves settings.json byte-for-byte identical' \
+    test "$(cat "$IH13/.claude/settings.json")" = "$NOJQ_BEFORE"
+  printf '%s' "$OUTU5" | grep -qF '{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh"}]}' \
+    && NOJQ_TOLD=1 || NOJQ_TOLD=0
+  wassert 'uninstall: without jq prints the exact entry to remove by hand' \
+    test "$NOJQ_TOLD" = 1
+else
+  printf 'skip: uninstall: no-jq case (could not build a PATH shim)\n'
+fi
+
+# HOME empty or unset would make every target an absolute path under / -
+# refuse before removing anything, rather than sweeping the filesystem root.
+UNOUT1="$(HOME= sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU6=$?
+wassert 'uninstall: empty HOME exits 1, removes nothing' test "$RCU6" -eq 1
+printf '%s' "$UNOUT1" | grep -q 'refusing to uninstall' && UN_REFUSED=1 || UN_REFUSED=0
+wassert 'uninstall: empty HOME says why it refused' test "$UN_REFUSED" = 1
+UNOUT2="$(env -u HOME sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU7=$?
+wassert 'uninstall: unset HOME exits 1, removes nothing' test "$RCU7" -eq 1
+
+# A typo'd flag must not silently fall through to installing. ORCA_STYLE is
+# set so a regression here would INSTALL (and be caught below) rather than
+# exit 2 down the no-style path, which would mask the bug behind the same
+# exit code; the message is asserted for the same reason.
+IH12="$INST_TMP/h12"; mkdir -p "$IH12"
+UNOUT3="$(ORCA_STYLE=claude HOME="$IH12" sh "$INSTALL_SH" --uninstal </dev/null 2>&1)"; RCU8=$?
+wassert 'install: an unrecognized option exits 2' test "$RCU8" -eq 2
+printf '%s' "$UNOUT3" | grep -q 'unrecognized option: --uninstal' && UN_BADOPT=1 || UN_BADOPT=0
+wassert 'install: an unrecognized option names the option it rejected' test "$UN_BADOPT" = 1
+wassert 'install: an unrecognized option installs nothing' test ! -d "$IH12/.claude"
+
+# ---------------------------------------------------------------------------
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [[ "$fail" -eq 0 ]]
