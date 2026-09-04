@@ -436,12 +436,39 @@ wassert 'install: custom CLAUDE_HOME receives the files' \
 wassert 'install: wired hook command names the custom CLAUDE_HOME' \
   test "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$CH5/settings.json")" = "$CH5/hooks/orca-start-watcher.sh"
 
+# The piped path clones ORCA_URL at ORCA_REF - a release tag by default - so
+# the origin standing in for github must carry that tag. A temp repo does:
+# the files install.sh installs, copied from the WORKING TREE so the code
+# under test is the code being edited, tagged v0.1.0; an empty commit tagged
+# v0.2.0; and an untagged commit at the head of main. The real checkout will
+# not do - it has no such tag, and in CI it is a shallow, tagless fetch.
+# GIT_CONFIG_GLOBAL and the identity vars keep a developer's own git config
+# (signing, hooks) out of the fixture. file:// keeps every clone offline.
+ORIGIN="$INST_TMP/origin"
+if command -v git >/dev/null 2>&1; then
+  mkdir -p "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts"
+  cp "$INSTALL_SH" "$ORIGIN/install.sh"
+  cp "$REPO_ROOT/agents/orca.md" "$ORIGIN/agents/orca.md"
+  cp "$HOOKS_DIR/orca-start-watcher.sh" "$ORIGIN/hooks/orca-start-watcher.sh"
+  cp "$WATCH_SCRIPT" "$ORIGIN/scripts/gh-watch.sh"
+  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+      GIT_AUTHOR_NAME=orca-test GIT_AUTHOR_EMAIL=orca-test@example.invalid \
+      GIT_COMMITTER_NAME=orca-test GIT_COMMITTER_EMAIL=orca-test@example.invalid
+    git -C "$ORIGIN" init -q -b main
+    git -C "$ORIGIN" add -A
+    git -C "$ORIGIN" commit -q -m 'release v0.1.0'
+    git -C "$ORIGIN" tag v0.1.0
+    git -C "$ORIGIN" commit -q --allow-empty -m 'release v0.2.0'
+    git -C "$ORIGIN" tag v0.2.0
+    git -C "$ORIGIN" commit -q --allow-empty -m 'unreleased' )
+fi
+
 # piped bootstrap: stdin-fed script ($0 is the shell) must clone to ORCA_REPO
 # and re-exec from the clone - never trust the cwd. file:// keeps it offline.
 if command -v git >/dev/null 2>&1; then
   BOOT="$INST_TMP/boot"; mkdir -p "$BOOT/home"
   ( cd "$INST_TMP" && \
-    ORCA_URL="file://$REPO_ROOT" ORCA_REPO="$BOOT/clone" ORCA_STYLE=claude \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$BOOT/clone" ORCA_STYLE=claude \
     HOME="$BOOT/home" sh <"$INSTALL_SH" ) >/dev/null 2>&1; RC9=$?
   wassert 'install: piped bootstrap exits 0' test "$RC9" -eq 0
   wassert 'install: piped bootstrap cloned to ORCA_REPO' \
@@ -460,7 +487,7 @@ fi
 if command -v git >/dev/null 2>&1; then
   TH1="$INST_TMP/tilde-slash"; mkdir -p "$TH1/home"
   OUTT1="$( cd "$INST_TMP" && \
-    ORCA_URL="file://$REPO_ROOT" ORCA_REPO='~/clone' ORCA_STYLE=claude \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO='~/clone' ORCA_STYLE=claude \
     HOME="$TH1/home" sh <"$INSTALL_SH" 2>&1 )"; RCT1=$?
   wassert 'install: ORCA_REPO="~/x" exits 0' test "$RCT1" -eq 0
   wassert 'install: ORCA_REPO="~/x" cloned to $HOME/x' \
@@ -477,7 +504,7 @@ if command -v git >/dev/null 2>&1; then
   # the bare `~` form resolves to $HOME itself
   TH2="$INST_TMP/tilde-bare"; mkdir -p "$TH2/home"
   OUTT2="$( cd "$INST_TMP" && \
-    ORCA_URL="file://$REPO_ROOT" ORCA_REPO='~' ORCA_STYLE=claude \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO='~' ORCA_STYLE=claude \
     HOME="$TH2/home" sh <"$INSTALL_SH" 2>&1 )"; RCT2=$?
   wassert 'install: ORCA_REPO="~" exits 0' test "$RCT2" -eq 0
   wassert 'install: ORCA_REPO="~" cloned into $HOME itself' \
@@ -490,6 +517,135 @@ if command -v git >/dev/null 2>&1; then
     test "$T2_RESOLVED" = 1
 else
   printf 'skip: install: literal-tilde ORCA_REPO (git unavailable)\n'
+fi
+
+# pinned ref: the piped bootstrap clones ORCA_REF - a release tag - never the
+# head of main, so `curl | sh` installs a known version, and a re-run moves an
+# existing checkout to it. Each case asserts the checkout itself (the tag HEAD
+# sits on, which is what the version line reads back) and then the line.
+if command -v git >/dev/null 2>&1; then
+  # default: the pinned tag, present locally so `git describe` can name it
+  PIN1="$INST_TMP/pin-default"; mkdir -p "$PIN1/home"
+  OUTV1="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN1/clone" ORCA_STYLE=claude \
+    HOME="$PIN1/home" sh <"$INSTALL_SH" 2>&1 )"; RCV1=$?
+  wassert 'install: pinned default exits 0' test "$RCV1" -eq 0
+  wassert 'install: pinned default checks out v0.1.0, not the head of main' \
+    test "$(git -C "$PIN1/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
+  printf '%s' "$OUTV1" | grep -qxF 'installed orca v0.1.0' && V1_SAID=1 || V1_SAID=0
+  wassert 'install: pinned default reports the version it installed' test "$V1_SAID" = 1
+
+  # ORCA_REF override: another tag ...
+  PIN2="$INST_TMP/pin-tag"; mkdir -p "$PIN2/home"
+  OUTV2="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN2/clone" ORCA_REF=v0.2.0 ORCA_STYLE=claude \
+    HOME="$PIN2/home" sh <"$INSTALL_SH" 2>&1 )"; RCV2=$?
+  wassert 'install: ORCA_REF=<tag> exits 0' test "$RCV2" -eq 0
+  wassert 'install: ORCA_REF=<tag> checks out that tag' \
+    test "$(git -C "$PIN2/clone" describe --tags --exact-match 2>/dev/null)" = v0.2.0
+  printf '%s' "$OUTV2" | grep -qxF 'installed orca v0.2.0' && V2_SAID=1 || V2_SAID=0
+  wassert 'install: ORCA_REF=<tag> reports that tag' test "$V2_SAID" = 1
+
+  # ... and a branch name: ORCA_REF=main is the documented development
+  # setting. Its head carries no tag, so the version line names the commit.
+  PIN3="$INST_TMP/pin-main"; mkdir -p "$PIN3/home"
+  OUTV3="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=main ORCA_STYLE=claude \
+    HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1 )"; RCV3=$?
+  wassert 'install: ORCA_REF=main exits 0' test "$RCV3" -eq 0
+  wassert 'install: ORCA_REF=main checks out the head of main' \
+    test "$(git -C "$PIN3/clone" rev-parse HEAD 2>/dev/null)" = "$(git -C "$ORIGIN" rev-parse main)"
+  printf '%s' "$OUTV3" | grep -qxF "installed orca $(git -C "$ORIGIN" rev-parse --short main)" \
+    && V3_SAID=1 || V3_SAID=0
+  wassert 'install: ORCA_REF=main reports the commit, having no tag to name' test "$V3_SAID" = 1
+
+  # re-run on an existing checkout: moved to the pinned tag from wherever it
+  # was left - here a branch, which is what the previous installer left.
+  OUTV4="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_STYLE=claude \
+    HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1 )"; RCV4=$?
+  wassert 'install: re-run on an existing checkout exits 0' test "$RCV4" -eq 0
+  wassert 'install: re-run moves the existing checkout to the pinned tag' \
+    test "$(git -C "$PIN3/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
+  printf '%s' "$OUTV4" | grep -qxF 'installed orca v0.1.0' && V4_SAID=1 || V4_SAID=0
+  wassert 'install: re-run reports the pinned version' test "$V4_SAID" = 1
+
+  # unknown ref: exits non-zero before anything is installed - on a machine
+  # with no checkout, and on one whose checkout then stays where it was.
+  PIN5="$INST_TMP/pin-unknown"; mkdir -p "$PIN5/home"
+  OUTV5="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN5/clone" ORCA_REF=v9.9.9 ORCA_STYLE=claude \
+    HOME="$PIN5/home" sh <"$INSTALL_SH" 2>&1 )"; RCV5=$?
+  wassert 'install: unknown ORCA_REF exits non-zero' test "$RCV5" -ne 0
+  wassert 'install: unknown ORCA_REF installs nothing' test ! -d "$PIN5/home/.claude"
+  wassert 'install: unknown ORCA_REF leaves no checkout behind' test ! -e "$PIN5/clone"
+  # our own guard line, not git's `Remote branch v9.9.9 not found` - which
+  # would still be there with the guard deleted.
+  printf '%s' "$OUTV5" | grep -qF 'could not clone orca v9.9.9' && V5_SAID=1 || V5_SAID=0
+  wassert 'install: unknown ORCA_REF fails through the clone guard, naming the ref' test "$V5_SAID" = 1
+
+  OUTV6="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=v9.9.9 ORCA_STYLE=claude \
+    HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1 )"; RCV6=$?
+  wassert 'install: unknown ORCA_REF on an existing checkout exits non-zero' test "$RCV6" -ne 0
+  # the guard's own line: with it deleted, a swallowed fetch failure would
+  # reach `checkout FETCH_HEAD`, and the exit status alone would not tell.
+  printf '%s' "$OUTV6" | grep -qF 'could not fetch v9.9.9' && V6_SAID=1 || V6_SAID=0
+  wassert 'install: unknown ORCA_REF on an existing checkout fails through the fetch guard' \
+    test "$V6_SAID" = 1
+  wassert 'install: unknown ORCA_REF leaves the existing checkout where it was' \
+    test "$(git -C "$PIN3/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
+
+  # a ref that leads with `-`: it follows `--`, so git reads it as a ref and
+  # never as an option. It fails through the same guard, with no `unknown
+  # switch` from git, and installs nothing into a fresh HOME.
+  PIN7="$INST_TMP/pin-dash"; mkdir -p "$PIN7/home"
+  OUTV7="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=-x ORCA_STYLE=claude \
+    HOME="$PIN7/home" sh <"$INSTALL_SH" 2>&1 )"; RCV7=$?
+  wassert 'install: ORCA_REF=-x exits non-zero' test "$RCV7" -ne 0
+  printf '%s' "$OUTV7" | grep -qF 'could not fetch -x' && V7_SAID=1 || V7_SAID=0
+  wassert 'install: ORCA_REF=-x fails through the fetch guard' test "$V7_SAID" = 1
+  printf '%s' "$OUTV7" | grep -q 'unknown switch' && V7_SWITCH=1 || V7_SWITCH=0
+  wassert 'install: ORCA_REF=-x reaches git as a ref, not as an option' test "$V7_SWITCH" = 0
+  wassert 'install: ORCA_REF=-x installs nothing' test ! -d "$PIN7/home/.claude"
+
+  # ORCA_URL is honoured on a re-run: the fetch goes to it, not to whatever
+  # remote the checkout carries - here one with no tags at all - and the
+  # checkout's own remote is left as it was.
+  TAGLESS="$INST_TMP/tagless"
+  PIN8="$INST_TMP/pin-url"; mkdir -p "$PIN8/home"
+  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    git clone -q --no-tags -- "file://$ORIGIN" "$TAGLESS"
+    git clone -q --depth 1 -- "file://$TAGLESS" "$PIN8/clone" )
+  OUTV8="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN8/clone" ORCA_STYLE=claude \
+    HOME="$PIN8/home" sh <"$INSTALL_SH" 2>&1 )"; RCV8=$?
+  wassert 'install: re-run against ORCA_URL exits 0 though the checkout remote lacks the tag' \
+    test "$RCV8" -eq 0
+  wassert 'install: re-run against ORCA_URL ends at the pinned tag' \
+    test "$(git -C "$PIN8/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
+  printf '%s' "$OUTV8" | grep -qxF 'installed orca v0.1.0' && V8_SAID=1 || V8_SAID=0
+  wassert 'install: re-run against ORCA_URL reports the pinned version' test "$V8_SAID" = 1
+  wassert 'install: re-run leaves the checkout remote as it was' \
+    test "$(git -C "$PIN8/clone" remote get-url origin)" = "file://$TAGLESS"
+
+  # version line, non-piped path: a release tarball has no .git, and unpacked
+  # inside some other repository `git describe` would walk up and report THAT
+  # repository's version. Gated on the checkout's own .git, so it prints none.
+  # The tagged origin above stands in for the enclosing repository.
+  TARBALL="$ORIGIN/tarball"; mkdir -p "$TARBALL"
+  cp -R "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts" "$ORIGIN/install.sh" "$TARBALL/"
+  PIN9="$INST_TMP/tarball-home"; mkdir -p "$PIN9"
+  OUTV9="$(ORCA_STYLE=claude HOME="$PIN9" sh "$TARBALL/install.sh" </dev/null 2>&1)"; RCV9=$?
+  wassert 'install: a tarball inside another repository exits 0' test "$RCV9" -eq 0
+  wassert 'install: a tarball inside another repository still installs' \
+    test -L "$PIN9/.claude/agents/orca.md"
+  printf '%s' "$OUTV9" | grep -q 'installed orca' && V9_SAID=1 || V9_SAID=0
+  wassert 'install: a tarball inside another repository prints no version line' \
+    test "$V9_SAID" = 0
+else
+  printf 'skip: install: pinned ORCA_REF (git unavailable)\n'
 fi
 
 # ---------------------------------------------------------------------------
