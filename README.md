@@ -217,12 +217,12 @@ On your machine:
   call and spawns nothing. The agents-style install wires no hook at all
   (`install.sh:116-124`).
 - The default install symlinks rather than copies (`ORCA_MODE=link`,
-  `install.sh:66-76`), so what runs is the clone at `~/.local/share/orca`, and
-  the piped installer fast-forwards that clone on every re-run
-  (`install.sh:21-29`). The playbook and watcher on your machine therefore
-  track upstream `main` — a later pull changes them with no reinstall and no
-  review step. `curl | sh` is an ongoing trust decision, not a one-time one;
-  `ORCA_MODE=copy` pins what you reviewed.
+  `install.sh:66-76`), so what runs is the clone at `~/.local/share/orca`.
+  The piped installer clones it at `ORCA_REF` (a release tag, `v0.1.0` by
+  default), and a re-run moves it to that tag, so the playbook and watcher on
+  your machine track that release. `ORCA_REF=main` follows `main` instead,
+  and a re-run then changes them with no review step. `ORCA_MODE=copy` pins
+  what you reviewed either way.
 
 On your repo: comments on issues, sets labels, pushes branches, opens PRs,
 posts and resolves review threads, requests reviewers, and merges its own PRs.

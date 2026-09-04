@@ -5,6 +5,8 @@ ORCA_URL="${ORCA_URL:-https://github.com/iQonAi/orca.git}"
 # The release the piped install checks out - a tag, so `curl | sh` installs a
 # known version rather than whatever main holds today. Bumped on each release.
 # Overridable: ORCA_REF=main follows the branch head (development).
+# Release tags are cut LIGHTWEIGHT: `clone --depth 1 --branch` of an annotated
+# tag prints a spurious "is not a commit!" warning on every install.
 ORCA_REF="${ORCA_REF:-v0.1.0}"
 
 # Parsed FIRST, before the bootstrap block below. Under `curl | sh -s --
@@ -91,19 +93,25 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
        if [ ! -f "$ORCA_REPO/agents/orca.md" ]; then
            # advice.detachedHead off: a clone at a tag is detached by design,
            # and the note git prints about it is noise in a curl | sh install.
-           git -c advice.detachedHead=false clone --depth 1 --branch "$ORCA_REF" "$ORCA_URL" "$ORCA_REPO" \
+           # `--` before the positionals: ORCA_URL and ORCA_REF are operator
+           # input, and a value that leads with `-` must reach git as a value,
+           # never as an option (`--upload-pack=<cmd>` runs a command).
+           git -c advice.detachedHead=false clone --depth 1 --branch "$ORCA_REF" -- "$ORCA_URL" "$ORCA_REPO" \
              || { echo "could not clone orca $ORCA_REF from $ORCA_URL" >&2; exit 1; }
        else
            # A piped install means "give me the pinned orca" - move the
            # checkout to ORCA_REF, whatever branch or tag it was left on.
+           # Fetched from ORCA_URL, not from whatever remote the checkout
+           # carries, so an override is honoured and a checkout with no
+           # `origin` still works; the checkout's own remote is left alone.
            # A tag is fetched with a destination so it lands locally, not
            # only in FETCH_HEAD: a bare fetch keeps no tag, and the version
            # line at the end reads it back. A name that is not a tag
            # (ORCA_REF=main) falls through to a plain fetch. A ref that exists
-           # nowhere fails here, before anything is installed.
-           git -C "$ORCA_REPO" fetch -q --depth 1 origin "+refs/tags/$ORCA_REF:refs/tags/$ORCA_REF" 2>/dev/null \
-             || git -C "$ORCA_REPO" fetch -q --depth 1 origin "$ORCA_REF" \
-             || { echo "could not fetch $ORCA_REF into $ORCA_REPO" >&2; exit 1; }
+           # nowhere fails here, before anything is installed. `--` as above.
+           git -C "$ORCA_REPO" fetch -q --depth 1 -- "$ORCA_URL" "+refs/tags/$ORCA_REF:refs/tags/$ORCA_REF" 2>/dev/null \
+             || git -C "$ORCA_REPO" fetch -q --depth 1 -- "$ORCA_URL" "$ORCA_REF" \
+             || { echo "could not fetch $ORCA_REF from $ORCA_URL into $ORCA_REPO" >&2; exit 1; }
            git -C "$ORCA_REPO" checkout -q --detach FETCH_HEAD
        fi
        exec "$ORCA_REPO/install.sh" "$@"
@@ -397,8 +405,13 @@ case "$STYLE" in
 esac
 [ -n "$BACKUP_DIR" ] && echo "replaced files moved to $BACKUP_DIR"
 # The checkout is the version record: the tag HEAD sits on (a pinned
-# install), else the commit (a development checkout).
-version=$(git -C "$ORCA_REPO" describe --tags --exact-match 2>/dev/null \
-    || git -C "$ORCA_REPO" rev-parse --short HEAD 2>/dev/null) || version=
+# install), else the commit (a development checkout). Only the checkout's
+# OWN .git counts: a tarball (no .git) unpacked inside some other repository
+# would otherwise have git walk up and report that repository's version.
+version=
+if [ -e "$ORCA_REPO/.git" ]; then
+    version=$(git -C "$ORCA_REPO" describe --tags --exact-match 2>/dev/null \
+        || git -C "$ORCA_REPO" rev-parse --short HEAD 2>/dev/null) || version=
+fi
 [ -n "$version" ] && echo "installed orca $version"
 echo "done."

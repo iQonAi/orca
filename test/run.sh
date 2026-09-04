@@ -579,15 +579,71 @@ if command -v git >/dev/null 2>&1; then
   wassert 'install: unknown ORCA_REF exits non-zero' test "$RCV5" -ne 0
   wassert 'install: unknown ORCA_REF installs nothing' test ! -d "$PIN5/home/.claude"
   wassert 'install: unknown ORCA_REF leaves no checkout behind' test ! -e "$PIN5/clone"
-  printf '%s' "$OUTV5" | grep -q 'v9.9.9' && V5_SAID=1 || V5_SAID=0
-  wassert 'install: unknown ORCA_REF names the ref it could not find' test "$V5_SAID" = 1
+  # our own guard line, not git's `Remote branch v9.9.9 not found` - which
+  # would still be there with the guard deleted.
+  printf '%s' "$OUTV5" | grep -qF 'could not clone orca v9.9.9' && V5_SAID=1 || V5_SAID=0
+  wassert 'install: unknown ORCA_REF fails through the clone guard, naming the ref' test "$V5_SAID" = 1
 
-  ( cd "$INST_TMP" && \
+  OUTV6="$( cd "$INST_TMP" && \
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=v9.9.9 ORCA_STYLE=claude \
-    HOME="$PIN3/home" sh <"$INSTALL_SH" >/dev/null 2>&1 ); RCV6=$?
+    HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1 )"; RCV6=$?
   wassert 'install: unknown ORCA_REF on an existing checkout exits non-zero' test "$RCV6" -ne 0
+  # the guard's own line: with it deleted, a swallowed fetch failure would
+  # reach `checkout FETCH_HEAD`, and the exit status alone would not tell.
+  printf '%s' "$OUTV6" | grep -qF 'could not fetch v9.9.9' && V6_SAID=1 || V6_SAID=0
+  wassert 'install: unknown ORCA_REF on an existing checkout fails through the fetch guard' \
+    test "$V6_SAID" = 1
   wassert 'install: unknown ORCA_REF leaves the existing checkout where it was' \
     test "$(git -C "$PIN3/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
+
+  # a ref that leads with `-`: it follows `--`, so git reads it as a ref and
+  # never as an option. It fails through the same guard, with no `unknown
+  # switch` from git, and installs nothing into a fresh HOME.
+  PIN7="$INST_TMP/pin-dash"; mkdir -p "$PIN7/home"
+  OUTV7="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=-x ORCA_STYLE=claude \
+    HOME="$PIN7/home" sh <"$INSTALL_SH" 2>&1 )"; RCV7=$?
+  wassert 'install: ORCA_REF=-x exits non-zero' test "$RCV7" -ne 0
+  printf '%s' "$OUTV7" | grep -qF 'could not fetch -x' && V7_SAID=1 || V7_SAID=0
+  wassert 'install: ORCA_REF=-x fails through the fetch guard' test "$V7_SAID" = 1
+  printf '%s' "$OUTV7" | grep -q 'unknown switch' && V7_SWITCH=1 || V7_SWITCH=0
+  wassert 'install: ORCA_REF=-x reaches git as a ref, not as an option' test "$V7_SWITCH" = 0
+  wassert 'install: ORCA_REF=-x installs nothing' test ! -d "$PIN7/home/.claude"
+
+  # ORCA_URL is honoured on a re-run: the fetch goes to it, not to whatever
+  # remote the checkout carries - here one with no tags at all - and the
+  # checkout's own remote is left as it was.
+  TAGLESS="$INST_TMP/tagless"
+  PIN8="$INST_TMP/pin-url"; mkdir -p "$PIN8/home"
+  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+    git clone -q --no-tags -- "file://$ORIGIN" "$TAGLESS"
+    git clone -q --depth 1 -- "file://$TAGLESS" "$PIN8/clone" )
+  OUTV8="$( cd "$INST_TMP" && \
+    ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN8/clone" ORCA_STYLE=claude \
+    HOME="$PIN8/home" sh <"$INSTALL_SH" 2>&1 )"; RCV8=$?
+  wassert 'install: re-run against ORCA_URL exits 0 though the checkout remote lacks the tag' \
+    test "$RCV8" -eq 0
+  wassert 'install: re-run against ORCA_URL ends at the pinned tag' \
+    test "$(git -C "$PIN8/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
+  printf '%s' "$OUTV8" | grep -qxF 'installed orca v0.1.0' && V8_SAID=1 || V8_SAID=0
+  wassert 'install: re-run against ORCA_URL reports the pinned version' test "$V8_SAID" = 1
+  wassert 'install: re-run leaves the checkout remote as it was' \
+    test "$(git -C "$PIN8/clone" remote get-url origin)" = "file://$TAGLESS"
+
+  # version line, non-piped path: a release tarball has no .git, and unpacked
+  # inside some other repository `git describe` would walk up and report THAT
+  # repository's version. Gated on the checkout's own .git, so it prints none.
+  # The tagged origin above stands in for the enclosing repository.
+  TARBALL="$ORIGIN/tarball"; mkdir -p "$TARBALL"
+  cp -R "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts" "$ORIGIN/install.sh" "$TARBALL/"
+  PIN9="$INST_TMP/tarball-home"; mkdir -p "$PIN9"
+  OUTV9="$(ORCA_STYLE=claude HOME="$PIN9" sh "$TARBALL/install.sh" </dev/null 2>&1)"; RCV9=$?
+  wassert 'install: a tarball inside another repository exits 0' test "$RCV9" -eq 0
+  wassert 'install: a tarball inside another repository still installs' \
+    test -L "$PIN9/.claude/agents/orca.md"
+  printf '%s' "$OUTV9" | grep -q 'installed orca' && V9_SAID=1 || V9_SAID=0
+  wassert 'install: a tarball inside another repository prints no version line' \
+    test "$V9_SAID" = 0
 else
   printf 'skip: install: pinned ORCA_REF (git unavailable)\n'
 fi
