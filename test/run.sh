@@ -378,6 +378,10 @@ wassert 'install: default CLAUDE_HOME wires the literal ~ form, unexpanded' \
   test "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$IH1/.claude/settings.json")" = '~/.claude/hooks/orca-start-watcher.sh'
 printf '%s' "$OUT1" | grep -q 'backup:' && FRESH_BACKUP=1 || FRESH_BACKUP=0
 wassert 'install: fresh install makes no backups' test "$FRESH_BACKUP" = 0
+# The summary line belongs to a run that moved something aside: with nothing
+# to back up it is absent, and its guard must not turn the run into exit 1 (#17).
+printf '%s' "$OUT1" | grep -q 'replaced files' && FRESH_REPLACED=1 || FRESH_REPLACED=0
+wassert 'install: fresh install prints no replaced-files line' test "$FRESH_REPLACED" = 0
 
 # rerun is a no-op
 OUT2="$(ORCA_STYLE=claude HOME="$IH1" sh "$INSTALL_SH" </dev/null 2>&1)"; RC2=$?
@@ -407,12 +411,14 @@ fi
 # copy mode replaces (and backs up) a pre-existing file with a regular file
 IH4="$INST_TMP/h4"; mkdir -p "$IH4/.claude/agents"
 printf 'old\n' > "$IH4/.claude/agents/orca.md"
-ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC5=$?
+OUT5="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null 2>&1)"; RC5=$?
 wassert 'install: copy mode exits 0' test "$RC5" -eq 0
 wassert 'install: copy mode installs a regular file, not a link' \
   bash -c "test -f '$IH4/.claude/agents/orca.md' && test ! -L '$IH4/.claude/agents/orca.md'"
 wassert 'install: pre-existing file was backed up' \
   bash -c "ls '$IH4'/.orca-backups/*/*-orca.md >/dev/null 2>&1"
+printf '%s' "$OUT5" | grep -qF "replaced files moved to $IH4/.orca-backups/" && BACKUP_SAID=1 || BACKUP_SAID=0
+wassert 'install: an install over an existing file names the backup dir' test "$BACKUP_SAID" = 1
 
 # copy-mode rerun is also a no-op (identical files short-circuit before backup)
 OUT6="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null 2>&1)"; RC6=$?

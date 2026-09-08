@@ -553,7 +553,12 @@ case "$STYLE" in
    claude) install_claude ;;
    agents) install_agents ;;
 esac
-[ -n "$BACKUP_DIR" ] && echo "replaced files moved to $BACKUP_DIR (after --uninstall, --restore $TS puts them back)"
+# Plain `if`, not `[ ... ] && echo`: under set -e a false test in an && list
+# does not abort, but as the LAST statement it is the exit status - 1, with
+# no diagnostic - so the form must not depend on what follows it (#17).
+if [ -n "$BACKUP_DIR" ]; then
+    echo "replaced files moved to $BACKUP_DIR (after --uninstall, --restore $TS puts them back)"
+fi
 # The checkout is the version record: the tag HEAD sits on (a pinned
 # install), else the commit (a development checkout). Only the checkout's
 # OWN .git counts: a tarball (no .git) unpacked inside some other repository
@@ -563,5 +568,7 @@ if [ -e "$ORCA_REPO/.git" ]; then
     version=$(git -C "$ORCA_REPO" describe --tags --exact-match 2>/dev/null \
         || git -C "$ORCA_REPO" rev-parse --short HEAD 2>/dev/null) || version=
 fi
-[ -n "$version" ] && echo "installed orca $version"
+if [ -n "$version" ]; then
+    echo "installed orca $version"
+fi
 echo "done."
