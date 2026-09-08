@@ -225,9 +225,17 @@ wire_claude_hook() {
        return 0
     fi
     entry=$(jq -nc --arg c "$hook_cmd" '{hooks:[{type:"command",command:$c}]}')
+    # Wired means an entry whose hooks[].command names the hook, whatever else
+    # it carries. Exact equality with $entry missed a hand-edited one (a
+    # `matcher`, a `timeout`) and appended a second copy on every run (#15).
+    # Both spellings count, as in unwire_claude_hook; for a custom CLAUDE_HOME
+    # they collapse to its own absolute form, so a separate default install
+    # never counts as this one.
+    wired=$(jq -nc --arg a "$hook_cmd" --arg b "$CH/hooks/orca-start-watcher.sh" '[$a,$b] | unique')
    created=0
    [ -f "$1" ] || { printf '{}' > "$1"; created=1; }
-   if jq -e --argjson e "$entry" '.hooks.SessionStart // [] | any(. == $e)' "$1" >/dev/null; then
+   if jq -e --argjson w "$wired" \
+       'any((.hooks.SessionStart // [])[] | objects | .hooks[]? | objects | .command; IN($w[]))' "$1" >/dev/null; then
       echo "    ok: SessionStart hook already wired"; return 0
    fi
   # backup() moved it; work on a restored copy. A file we just created has
