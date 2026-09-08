@@ -45,6 +45,14 @@ One line — it prompts for which configuration style to install:
 curl -fsSL https://raw.githubusercontent.com/iQonAi/orca/main/install.sh | sh
 ```
 
+Piped into a terminal it still prompts, because the prompt reads `/dev/tty`.
+With no tty (CI, a container build) set `ORCA_STYLE` explicitly; without it
+the script exits 2 and installs nothing:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/iQonAi/orca/main/install.sh | ORCA_STYLE=claude sh
+```
+
 Or, to read before you run:
 
 ```sh
@@ -77,7 +85,7 @@ Environment overrides:
 
 | Variable      | Default                | Meaning                                        |
 | ------------- | ---------------------- | ---------------------------------------------- |
-| `ORCA_STYLE`  | (prompt)               | `claude` or `agents`; skips the prompt. With no tty, an existing `~/.claude` selects claude, otherwise the script exits 2 |
+| `ORCA_STYLE`  | (prompt)               | `claude` or `agents`; skips the prompt. Required when there is no tty: without it the script exits 2 |
 | `ORCA_REPO`   | `~/.local/share/orca`  | where the piped install clones the repo        |
 | `ORCA_URL`    | `https://github.com/iQonAi/orca.git` | the repository the piped install clones from, and fetches from on re-run; set it to a fork or a mirror. `ORCA_REF` selects the ref within it |
 | `ORCA_REF`    | `v0.1.0`               | the release tag the piped install checks out, and moves an existing clone to on re-run; `ORCA_REF=main` for development |

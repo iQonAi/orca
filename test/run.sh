@@ -399,13 +399,36 @@ wassert 'install: agents style installs watcher + playbook' \
   bash -c "test -e '$IH2/.local/bin/gh-watch' && test -e '$IH2/.config/orca/AGENTS.md'"
 wassert 'install: agents style creates no ~/.claude' test ! -d "$IH2/.claude"
 
-# no tty, no ORCA_STYLE, nothing to detect -> refuse with exit 2, never hang
+# no tty, no ORCA_STYLE -> refuse with exit 2 and install nothing, never hang
+# and never guess. An existing ~/.claude used to select the claude style with
+# only a notice, and the install then edited its settings.json (#16): it is
+# now the same refusal, and the directory stays empty. setsid drops the
+# controlling terminal, so /dev/tty cannot be opened, as in CI.
 IH3="$INST_TMP/h3"; mkdir -p "$IH3"
+IH24="$INST_TMP/h24"; mkdir -p "$IH24/.claude"
+IH25="$INST_TMP/h25"; mkdir -p "$IH25"
+NOTTY_MSG='no tty and ORCA_STYLE unset; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents'
 if command -v setsid >/dev/null 2>&1; then
-  HOME="$IH3" setsid -w sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC4=$?
+  OUT4="$(HOME="$IH3" setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"; RC4=$?
   wassert 'install: no tty + no ORCA_STYLE exits 2' test "$RC4" -eq 2
+  printf '%s' "$OUT4" | grep -qF "$NOTTY_MSG" && NOTTY_SAID=1 || NOTTY_SAID=0
+  wassert 'install: no tty + no ORCA_STYLE says how to re-run' test "$NOTTY_SAID" = 1
+  wassert 'install: no tty + no ORCA_STYLE installs nothing' test ! -d "$IH3/.claude"
+  OUT4B="$(HOME="$IH24" setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"; RC4B=$?
+  wassert 'install: no tty + no ORCA_STYLE + an existing ~/.claude exits 2, not inferred' \
+    test "$RC4B" -eq 2
+  printf '%s' "$OUT4B" | grep -qF "$NOTTY_MSG" && NOTTY_SAID_B=1 || NOTTY_SAID_B=0
+  wassert 'install: no tty + no ORCA_STYLE + an existing ~/.claude says how to re-run' \
+    test "$NOTTY_SAID_B" = 1
+  wassert 'install: no tty + no ORCA_STYLE + an existing ~/.claude leaves it empty' \
+    test -z "$(ls -A "$IH24/.claude")"
+  # with the style stated there is nothing to ask, so no tty is no obstacle
+  HOME="$IH25" ORCA_STYLE=claude setsid -w sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC4C=$?
+  wassert 'install: no tty + ORCA_STYLE=claude exits 0' test "$RC4C" -eq 0
+  wassert 'install: no tty + ORCA_STYLE=claude installs and wires the hook' \
+    test "$(jq '.hooks.SessionStart | length' "$IH25/.claude/settings.json")" = 1
 else
-  printf 'skip: install: no-tty case (setsid unavailable)\n'
+  printf 'skip: install: no-tty cases (setsid unavailable)\n'
 fi
 
 # copy mode replaces (and backs up) a pre-existing file with a regular file
@@ -493,6 +516,18 @@ ORCA_STYLE=claude HOME="$IH21" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 wassert 'install: a rerun beside the unrelated entry keeps exactly two entries' \
   test "$(jq '.hooks.SessionStart | length' "$IH21/.claude/settings.json")" = 2
 
+# ...and so is an entry whose command merely CONTAINS the hook path: wired
+# means equal to it, never a substring of it, or a `.bak` beside the hook
+# would pass for the hook and orca would be left unwired (#38).
+IH26="$INST_TMP/h26"; mkdir -p "$IH26/.claude"
+printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh.bak"}]}]}}' \
+  >"$IH26/.claude/settings.json"
+ORCA_STYLE=claude HOME="$IH26" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: an entry whose command merely contains the hook path is not taken for it (orca wired beside it)' \
+  test "$(jq '.hooks.SessionStart | length' "$IH26/.claude/settings.json")" = 2
+wassert 'install: the containing entry and the orca entry both stand, each with its own command' \
+  test "$(jq -c '[.hooks.SessionStart[].hooks[].command]' "$IH26/.claude/settings.json")" = '["~/.claude/hooks/orca-start-watcher.sh.bak","~/.claude/hooks/orca-start-watcher.sh"]'
+
 # the expanded spelling is recognised too: the absolute path a custom
 # CLAUDE_HOME writes, and the default path spelled out in full by hand.
 IH22="$INST_TMP/h22"; CH22="$INST_TMP/ch22"; mkdir -p "$IH22" "$CH22"
@@ -511,6 +546,20 @@ printf '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","comm
 ORCA_STYLE=claude HOME="$IH23" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 wassert 'install: a hand-wired entry spelling the default path out in full is not duplicated' \
   test "$(jq '.hooks.SessionStart | length' "$IH23/.claude/settings.json")" = 1
+
+# a trailing slash on CLAUDE_HOME names the same home: `/x/` used to build the
+# hook identity as `/x//hooks/...`, which matched no hand-wired `/x/hooks/...`,
+# so install appended a duplicate on every run (#38).
+IH27="$INST_TMP/h27"; CH27="$INST_TMP/ch27"; mkdir -p "$IH27" "$CH27"
+printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s/hooks/orca-start-watcher.sh"}]}]}}\n' "$CH27" \
+  >"$CH27/settings.json"
+cp "$CH27/settings.json" "$INST_TMP/h27-settings.before"
+ORCA_STYLE=claude HOME="$IH27" CLAUDE_HOME="$CH27/" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD5=$?
+wassert 'install: CLAUDE_HOME with a trailing slash exits 0' test "$RCD5" -eq 0
+wassert 'install: CLAUDE_HOME with a trailing slash does not duplicate a hand-wired plain-path entry' \
+  test "$(jq '.hooks.SessionStart | length' "$CH27/settings.json")" = 1
+wassert 'install: CLAUDE_HOME with a trailing slash leaves the hand-wired settings.json untouched' \
+  cmp -s "$INST_TMP/h27-settings.before" "$CH27/settings.json"
 
 # The piped path clones ORCA_URL at ORCA_REF - a release tag by default - so
 # the origin standing in for github must carry that tag. A temp repo does:
@@ -833,6 +882,16 @@ wassert 'uninstall: custom CLAUDE_HOME files are removed' \
   bash -c "test ! -e '$CH10/agents/orca.md' && test ! -e '$CH10/hooks/orca-start-watcher.sh'"
 wassert 'uninstall: custom CLAUDE_HOME settings.json is unwired' \
   test "$(jq '.hooks.SessionStart // [] | length' "$CH10/settings.json")" = 0
+
+# ...spelled with a trailing slash at uninstall time, it is still the same
+# home: the installer's own entry is found and dropped, where `/x//hooks/...`
+# used to find nothing and report no orca entry (#38).
+IH28="$INST_TMP/h28"; CH28="$INST_TMP/ch28"; mkdir -p "$IH28"
+ORCA_STYLE=claude HOME="$IH28" CLAUDE_HOME="$CH28" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IH28" CLAUDE_HOME="$CH28/" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU12=$?
+wassert 'uninstall: CLAUDE_HOME with a trailing slash exits 0' test "$RCU12" -eq 0
+wassert 'uninstall: CLAUDE_HOME with a trailing slash unwires the entry the installer wrote' \
+  test "$(jq '.hooks.SessionStart // [] | length' "$CH28/settings.json")" = 0
 
 # backups are the user's escape hatch: uninstall points at them, never
 # restores blind (which run's backup would it even pick?) and never deletes.
