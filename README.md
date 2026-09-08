@@ -119,13 +119,10 @@ status is non-zero if anything remains, so re-running after fixing the cause
 
 Deliberately left alone:
 
-- **Your backups.** `~/.orca-backups/<timestamp>/` is never touched or
-  restored from — uninstall prints the path and you restore what you want by
-  hand. Automatic restore is not possible against the current backup format:
-  files are stored by basename with no record of where they came from, and
-  `AGENTS.md` does not even share a basename with its destination.
-  [#29](https://github.com/iQonAi/orca/issues/29) tracks the manifest work
-  that would make it possible.
+- **Your backups.** `~/.orca-backups/<timestamp>/` is never touched, and
+  never restored from blind: there can be several runs, and only you know
+  which one. Uninstall prints the path; putting a run back is a separate,
+  explicit step (see [Restore](#restore)).
 - **Everything else in `settings.json`.** Only entries equal to the one the
   installer wrote are dropped; other `SessionStart` entries, other hook
   types, and unrelated keys survive. An entry you merged the orca command
@@ -141,6 +138,35 @@ Deliberately left alone:
 Without `jq` it changes no JSON: it prints the exact entry to delete from
 `settings.json` by hand, mirroring what install does. With `$HOME` unset or
 empty it refuses outright rather than building paths under `/`.
+
+#### Restore
+
+Each run directory holds a `MANIFEST`: one line per file it moved aside — the
+backup name (`01-orca.md`, `02-settings.json`, …), a tab, and the absolute
+path it came from. `--restore` reads it:
+
+```sh
+./install.sh --restore              # list the runs and what each one holds
+./install.sh --restore <timestamp>  # put that run back
+```
+
+Or piped, like `--uninstall`: `curl -fsSL … | sh -s -- --restore <timestamp>`.
+
+It copies each file back only if nothing is at its original path; anything
+already there is printed as `skipped: exists` and never overwritten, so run
+`--uninstall` first. The backup copies stay where they are. Two things it
+never does:
+
+- **Restore `settings.json`.** The backup is the entire pre-install file, so
+  copying it back would revert every setting changed since. `--uninstall`
+  already removes the hook entry surgically; anything else in that copy is a
+  manual merge, and `--restore` prints its path and leaves it to you.
+- **Guess.** An unknown run exits non-zero and changes nothing, and a run
+  made before the manifest existed is listed as `no manifest: restore by
+  hand`.
+
+Like `--uninstall`, it never clones, fetches, or re-executes anything, and it
+honours the same `$HOME` guard.
 
 ## Usage
 
