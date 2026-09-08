@@ -57,10 +57,21 @@ Styles:
   `~/.claude/{agents,hooks,scripts}` and wires the SessionStart hook into
   `~/.claude/settings.json` (needs `jq`; prints the snippet to add by hand
   if `jq` is missing).
-- **agents** — for AGENTS.md-convention agents (Codex/Cursor/Gemini-class):
-  installs the watcher to `~/.local/bin/gh-watch` and the playbook to
-  `~/.config/orca/AGENTS.md`. The SessionStart hook is Claude-specific and
-  is skipped; launch the watcher yourself per the playbook.
+- **agents** — **experimental and untested**; for AGENTS.md-convention agents
+  (Codex/Cursor/Gemini-class). It installs the watcher to
+  `~/.local/bin/gh-watch` and the playbook to `~/.config/orca/AGENTS.md`. The
+  SessionStart hook is Claude-specific and is skipped; launch the watcher
+  yourself per the playbook. The install itself works (the files land; no
+  hook is wired), but orca has never been run under any of those harnesses.
+  The playbook depends on these Claude Code features, and each needs a
+  working equivalent before this style can be called supported:
+  - subagents through the Agent tool (workers and reviewers);
+  - a git worktree per worker;
+  - `ScheduleWakeup`, which drives the poll loop;
+  - background jobs whose exit re-invokes the session (the watcher's exit is
+    what wakes orca);
+  - the SessionStart hook that tells orca to launch the watcher
+    (`hooks/orca-start-watcher.sh`).
 
 Environment overrides:
 
@@ -335,6 +346,9 @@ as well as the model follows its playbook.
   activity (`agents/orca.md:54-57`), so cost scales with how busy the repo is.
   No measured figure is available; tracked in
   [#23](https://github.com/iQonAi/orca/issues/23).
+- **The `agents` install style is untested.** Orca has never been run under a
+  Codex, Cursor, or Gemini-class harness; the Claude Code features it would
+  need are listed under [Install](#install).
 
 ## Tests
 
