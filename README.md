@@ -64,7 +64,7 @@ Styles:
   yourself per the playbook. The install itself works (the files land; no
   hook is wired), but orca has never been run under any of those harnesses.
   The playbook depends on these Claude Code features, and each needs a
-  working equivalent before this style can be called supported:
+  working equivalent before this style can be considered supported:
   - subagents through the Agent tool (workers and reviewers);
   - a git worktree per worker;
   - `ScheduleWakeup`, which drives the poll loop;
