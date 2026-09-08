@@ -150,8 +150,13 @@ resolve_style() {
         esac
     else
         # An existing ~/.claude is not consent: inferring the claude style from
-        # it edited settings.json on a guess, with only a notice (#16).
-        echo "no tty and ORCA_STYLE unset; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
+        # it edited settings.json on a guess, with only a notice (#16). A value
+        # that is set but not a style (a typo in CI) is named, not called unset.
+        if [ -n "${ORCA_STYLE:-}" ]; then
+            echo "no tty and ORCA_STYLE=$ORCA_STYLE is not claude or agents; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
+        else
+            echo "no tty and ORCA_STYLE unset; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
+        fi
         exit 2
     fi
 }
@@ -198,10 +203,11 @@ install_one() { # $1 src, $2 dst - link by default, ORCA_MODE=copy to copy
 
 install_claude() {
     CH="${CLAUDE_HOME:-$HOME/.claude}"
-    # One trailing slash is dropped: `/x/` is the same home as `/x`, but the
+    # Trailing slashes are dropped: `/x/` is the same home as `/x`, but the
     # hook identity built from it would read `/x//hooks/...` and match neither
     # a hand-wired `/x/hooks/...` nor, on --uninstall, its own entry (#38).
-    CH="${CH%/}"
+    # The inner expansion is the trailing run of slashes; the outer strips it.
+    CH="${CH%"${CH##*[!/]}"}"
     mkdir -p "$CH/agents" "$CH/hooks" "$CH/scripts"
     install_one "$ORCA_REPO/agents/orca.md"     "$CH/agents/orca.md"
     install_one "$ORCA_REPO/hooks/orca-start-watcher.sh" "$CH/hooks/orca-start-watcher.sh"
@@ -386,7 +392,8 @@ unwire_claude_hook() {
 
 uninstall_claude() {
     CH="${CLAUDE_HOME:-$HOME/.claude}"
-    CH="${CH%/}"   # as in install_claude: `/x/` names the same entry as `/x`
+    # as in install_claude: `/x/` and `/x//` name the same entry as `/x`
+    CH="${CH%"${CH##*[!/]}"}"
     remove_installed "$CH/agents/orca.md"                agents/orca.md
     remove_installed "$CH/hooks/orca-start-watcher.sh"   hooks/orca-start-watcher.sh
     remove_installed "$CH/scripts/gh-watch.sh"           scripts/gh-watch.sh

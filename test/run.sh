@@ -407,6 +407,7 @@ wassert 'install: agents style creates no ~/.claude' test ! -d "$IH2/.claude"
 IH3="$INST_TMP/h3"; mkdir -p "$IH3"
 IH24="$INST_TMP/h24"; mkdir -p "$IH24/.claude"
 IH25="$INST_TMP/h25"; mkdir -p "$IH25"
+IH29="$INST_TMP/h29"; mkdir -p "$IH29"
 NOTTY_MSG='no tty and ORCA_STYLE unset; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents'
 if command -v setsid >/dev/null 2>&1; then
   OUT4="$(HOME="$IH3" setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"; RC4=$?
@@ -427,6 +428,13 @@ if command -v setsid >/dev/null 2>&1; then
   wassert 'install: no tty + ORCA_STYLE=claude exits 0' test "$RC4C" -eq 0
   wassert 'install: no tty + ORCA_STYLE=claude installs and wires the hook' \
     test "$(jq '.hooks.SessionStart | length' "$IH25/.claude/settings.json")" = 1
+  # a value that is set but not a style - a typo in CI - is named, not called unset
+  OUT4D="$(HOME="$IH29" ORCA_STYLE=cluade setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"; RC4D=$?
+  wassert 'install: no tty + an invalid ORCA_STYLE exits 2' test "$RC4D" -eq 2
+  printf '%s' "$OUT4D" | grep -qF 'no tty and ORCA_STYLE=cluade is not claude or agents; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents' \
+    && NOTTY_NAMED=1 || NOTTY_NAMED=0
+  wassert 'install: no tty + an invalid ORCA_STYLE names the value' test "$NOTTY_NAMED" = 1
+  wassert 'install: no tty + an invalid ORCA_STYLE installs nothing' test ! -d "$IH29/.claude"
 else
   printf 'skip: install: no-tty cases (setsid unavailable)\n'
 fi
@@ -559,6 +567,13 @@ wassert 'install: CLAUDE_HOME with a trailing slash exits 0' test "$RCD5" -eq 0
 wassert 'install: CLAUDE_HOME with a trailing slash does not duplicate a hand-wired plain-path entry' \
   test "$(jq '.hooks.SessionStart | length' "$CH27/settings.json")" = 1
 wassert 'install: CLAUDE_HOME with a trailing slash leaves the hand-wired settings.json untouched' \
+  cmp -s "$INST_TMP/h27-settings.before" "$CH27/settings.json"
+# every trailing slash, not just one: `<dir>//` is the same home too
+ORCA_STYLE=claude HOME="$IH27" CLAUDE_HOME="$CH27//" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD6=$?
+wassert 'install: CLAUDE_HOME with two trailing slashes exits 0' test "$RCD6" -eq 0
+wassert 'install: CLAUDE_HOME with two trailing slashes does not duplicate a hand-wired plain-path entry' \
+  test "$(jq '.hooks.SessionStart | length' "$CH27/settings.json")" = 1
+wassert 'install: CLAUDE_HOME with two trailing slashes leaves the hand-wired settings.json untouched' \
   cmp -s "$INST_TMP/h27-settings.before" "$CH27/settings.json"
 
 # The piped path clones ORCA_URL at ORCA_REF - a release tag by default - so
@@ -891,6 +906,12 @@ ORCA_STYLE=claude HOME="$IH28" CLAUDE_HOME="$CH28" sh "$INSTALL_SH" </dev/null >
 HOME="$IH28" CLAUDE_HOME="$CH28/" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU12=$?
 wassert 'uninstall: CLAUDE_HOME with a trailing slash exits 0' test "$RCU12" -eq 0
 wassert 'uninstall: CLAUDE_HOME with a trailing slash unwires the entry the installer wrote' \
+  test "$(jq '.hooks.SessionStart // [] | length' "$CH28/settings.json")" = 0
+# every trailing slash, not just one: `<dir>//` finds the entry too
+ORCA_STYLE=claude HOME="$IH28" CLAUDE_HOME="$CH28" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IH28" CLAUDE_HOME="$CH28//" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU13=$?
+wassert 'uninstall: CLAUDE_HOME with two trailing slashes exits 0' test "$RCU13" -eq 0
+wassert 'uninstall: CLAUDE_HOME with two trailing slashes unwires the entry the installer wrote' \
   test "$(jq '.hooks.SessionStart // [] | length' "$CH28/settings.json")" = 0
 
 # backups are the user's escape hatch: uninstall points at them, never

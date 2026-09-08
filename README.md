@@ -45,9 +45,10 @@ One line — it prompts for which configuration style to install:
 curl -fsSL https://raw.githubusercontent.com/iQonAi/orca/main/install.sh | sh
 ```
 
-Piped into a terminal it still prompts, because the prompt reads `/dev/tty`.
-With no tty (CI, a container build) set `ORCA_STYLE` explicitly; without it
-the script exits 2 and installs nothing:
+Piped into a terminal it still prompts while `ORCA_STYLE` is unset, because
+the prompt reads `/dev/tty`. With no tty (CI, a container build) set
+`ORCA_STYLE` explicitly; if it is unset there, the script exits 2 and does
+not touch `~/.claude` or `CLAUDE_HOME`:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/iQonAi/orca/main/install.sh | ORCA_STYLE=claude sh
