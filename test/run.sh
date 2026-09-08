@@ -436,6 +436,75 @@ wassert 'install: custom CLAUDE_HOME receives the files' \
 wassert 'install: wired hook command names the custom CLAUDE_HOME' \
   test "$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$CH5/settings.json")" = "$CH5/hooks/orca-start-watcher.sh"
 
+# A settings.json that already wires the hook BY HAND counts as wired, whatever
+# else the entry carries: the dedupe goes by the command an entry runs, never
+# by exact equality with the entry the installer writes. Exact equality missed
+# a hand-edited entry (a `matcher`, a `timeout` inside hooks[]) and appended a
+# second copy on every run (#15). A recognised entry leaves the file untouched
+# - a rewrite would have backed it up and reformatted it - so cmp is asserted
+# beside the entry count.
+IH19="$INST_TMP/h19"; mkdir -p "$IH19/.claude"
+printf '%s\n' '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh"}]}]}}' \
+  >"$IH19/.claude/settings.json"
+cp "$IH19/.claude/settings.json" "$INST_TMP/h19-settings.before"
+OUTD1="$(ORCA_STYLE=claude HOME="$IH19" sh "$INSTALL_SH" </dev/null 2>&1)"; RCD1=$?
+wassert 'install: a hand-wired entry with a matcher key exits 0' test "$RCD1" -eq 0
+wassert 'install: a hand-wired entry with a matcher key is not duplicated' \
+  test "$(jq '.hooks.SessionStart | length' "$IH19/.claude/settings.json")" = 1
+wassert 'install: a hand-wired entry with a matcher key leaves settings.json untouched' \
+  cmp -s "$INST_TMP/h19-settings.before" "$IH19/.claude/settings.json"
+printf '%s' "$OUTD1" | grep -qF 'ok: SessionStart hook already wired' && D1_SAID=1 || D1_SAID=0
+wassert 'install: a hand-wired entry with a matcher key is reported as already wired' test "$D1_SAID" = 1
+ORCA_STYLE=claude HOME="$IH19" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: a rerun over a hand-wired entry keeps exactly one entry' \
+  test "$(jq '.hooks.SessionStart | length' "$IH19/.claude/settings.json")" = 1
+
+# the same, with the extra key inside hooks[] rather than beside it
+IH20="$INST_TMP/h20"; mkdir -p "$IH20/.claude"
+printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh","timeout":10}]}]}}' \
+  >"$IH20/.claude/settings.json"
+cp "$IH20/.claude/settings.json" "$INST_TMP/h20-settings.before"
+ORCA_STYLE=claude HOME="$IH20" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD2=$?
+wassert 'install: a hand-wired entry with extra keys inside hooks[] exits 0' test "$RCD2" -eq 0
+wassert 'install: a hand-wired entry with extra keys inside hooks[] is not duplicated' \
+  test "$(jq '.hooks.SessionStart | length' "$IH20/.claude/settings.json")" = 1
+wassert 'install: a hand-wired entry with extra keys inside hooks[] leaves settings.json untouched' \
+  cmp -s "$INST_TMP/h20-settings.before" "$IH20/.claude/settings.json"
+
+# an unrelated entry - a matcher, extra keys, a command of its own - is never
+# taken for the hook: orca is wired beside it, it survives with every key and
+# value intact, and a rerun adds nothing.
+IH21="$INST_TMP/h21"; mkdir -p "$IH21/.claude"
+printf '%s\n' '{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"~/.claude/hooks/mine.sh","timeout":5}]}]}}' \
+  >"$IH21/.claude/settings.json"
+ORCA_STYLE=claude HOME="$IH21" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: an unrelated SessionStart entry is not taken for the hook (orca wired beside it)' \
+  test "$(jq '.hooks.SessionStart | length' "$IH21/.claude/settings.json")" = 2
+wassert 'install: the unrelated SessionStart entry survives with its keys and values intact' \
+  test "$(jq -c '.hooks.SessionStart[0]' "$IH21/.claude/settings.json")" = '{"matcher":"startup","hooks":[{"type":"command","command":"~/.claude/hooks/mine.sh","timeout":5}]}'
+ORCA_STYLE=claude HOME="$IH21" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: a rerun beside the unrelated entry keeps exactly two entries' \
+  test "$(jq '.hooks.SessionStart | length' "$IH21/.claude/settings.json")" = 2
+
+# the expanded spelling is recognised too: the absolute path a custom
+# CLAUDE_HOME writes, and the default path spelled out in full by hand.
+IH22="$INST_TMP/h22"; CH22="$INST_TMP/ch22"; mkdir -p "$IH22" "$CH22"
+printf '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"%s/hooks/orca-start-watcher.sh"}]}]}}\n' "$CH22" \
+  >"$CH22/settings.json"
+cp "$CH22/settings.json" "$INST_TMP/h22-settings.before"
+ORCA_STYLE=claude HOME="$IH22" CLAUDE_HOME="$CH22" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD4=$?
+wassert 'install: a hand-wired entry naming a custom CLAUDE_HOME exits 0' test "$RCD4" -eq 0
+wassert 'install: a hand-wired entry naming a custom CLAUDE_HOME is not duplicated' \
+  test "$(jq '.hooks.SessionStart | length' "$CH22/settings.json")" = 1
+wassert 'install: a hand-wired entry naming a custom CLAUDE_HOME leaves settings.json untouched' \
+  cmp -s "$INST_TMP/h22-settings.before" "$CH22/settings.json"
+IH23="$INST_TMP/h23"; mkdir -p "$IH23/.claude"
+printf '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"%s/.claude/hooks/orca-start-watcher.sh"}]}]}}\n' "$IH23" \
+  >"$IH23/.claude/settings.json"
+ORCA_STYLE=claude HOME="$IH23" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: a hand-wired entry spelling the default path out in full is not duplicated' \
+  test "$(jq '.hooks.SessionStart | length' "$IH23/.claude/settings.json")" = 1
+
 # The piped path clones ORCA_URL at ORCA_REF - a release tag by default - so
 # the origin standing in for github must carry that tag. A temp repo does:
 # the files install.sh installs, copied from the WORKING TREE so the code
