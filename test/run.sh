@@ -477,11 +477,12 @@ wassert 'install: a hand-wired entry with extra keys inside hooks[] leaves setti
 IH21="$INST_TMP/h21"; mkdir -p "$IH21/.claude"
 printf '%s\n' '{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"~/.claude/hooks/mine.sh","timeout":5}]}]}}' \
   >"$IH21/.claude/settings.json"
+PRE21="$(jq -Sc '.hooks.SessionStart[0]' "$IH21/.claude/settings.json")"
 ORCA_STYLE=claude HOME="$IH21" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 wassert 'install: an unrelated SessionStart entry is not taken for the hook (orca wired beside it)' \
   test "$(jq '.hooks.SessionStart | length' "$IH21/.claude/settings.json")" = 2
 wassert 'install: the unrelated SessionStart entry survives with its keys and values intact' \
-  test "$(jq -c '.hooks.SessionStart[0]' "$IH21/.claude/settings.json")" = '{"matcher":"startup","hooks":[{"type":"command","command":"~/.claude/hooks/mine.sh","timeout":5}]}'
+  test "$(jq -Sc '.hooks.SessionStart[0]' "$IH21/.claude/settings.json")" = "$PRE21"
 ORCA_STYLE=claude HOME="$IH21" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 wassert 'install: a rerun beside the unrelated entry keeps exactly two entries' \
   test "$(jq '.hooks.SessionStart | length' "$IH21/.claude/settings.json")" = 2
