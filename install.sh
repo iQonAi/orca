@@ -18,11 +18,20 @@ ACTION=install
 RESTORE_RUN=
 while [ $# -gt 0 ]; do
     case "$1" in
-        --uninstall) ACTION=uninstall ;;
-        # Alone it lists the backup runs; with a run name it puts that run back.
+        # One action per run: a second action flag is refused, never silently
+        # the winner.
+        --uninstall)
+            [ "$ACTION" = install ] || { echo "use one of --uninstall, --restore" >&2; exit 2; }
+            ACTION=uninstall ;;
+        # Alone it lists the backup runs; with a run name it puts that run
+        # back. A value leading with `-` is a flag, not a run name: it is left
+        # in place for the next round to reject.
         --restore)
+            [ "$ACTION" = install ] || { echo "use one of --uninstall, --restore" >&2; exit 2; }
             ACTION=restore
-            if [ $# -gt 1 ]; then shift; RESTORE_RUN=$1; fi ;;
+            if [ $# -gt 1 ]; then
+                case "$2" in -*) ;; *) shift; RESTORE_RUN=$1 ;; esac
+            fi ;;
         # Rejected rather than ignored: a typo'd flag must not silently run
         # the opposite action of the one that was asked for.
         *) echo "unrecognized option: $1" >&2; exit 2 ;;
@@ -161,11 +170,18 @@ backup() { # move an existing target aside, once-per-run dir
     # `<name><TAB><origin path>` so --restore can put each one back exactly
     # where it came from (AGENTS.md does not even share a basename with the
     # source it was installed from). The destination is left in BACKUP_DST
-    # for the caller.
+    # for the caller. One path per line, tab-separated: a path holding a
+    # newline cannot be represented, and such a HOME already breaks the hook
+    # path the installer writes into settings.json.
+    # The origin is recorded absolute: a relative target (CLAUDE_HOME=relch)
+    # is anchored to the directory it was moved from, so --restore puts it
+    # back there no matter where it is run from later.
+    origin=$1
+    case "$origin" in /*) ;; *) origin="$PWD/$origin" ;; esac
     BACKUP_N=$((BACKUP_N + 1))
     BACKUP_DST="$BACKUP_DIR/$(printf '%02d' "$BACKUP_N")-${1##*/}"
     mv "$1" "$BACKUP_DST"
-    printf '%s\t%s\n' "${BACKUP_DST##*/}" "$1" >> "$BACKUP_DIR/MANIFEST"
+    printf '%s\t%s\n' "${BACKUP_DST##*/}" "$origin" >> "$BACKUP_DIR/MANIFEST"
     echo "backup: $1 -> $BACKUP_DST"
 }
 
@@ -450,6 +466,14 @@ restore() {
         list_runs
         return 0
     fi
+    # A directory NAME, never a path: `..`, `x/..` or a leading `/` would
+    # reach a MANIFEST outside ~/.orca-backups/. list_runs never shows a
+    # dotted name (its glob skips them), so nothing valid is refused.
+    case "$RESTORE_RUN" in
+        */*|.*)
+            echo "invalid run name: $RESTORE_RUN (--restore with no argument lists them)" >&2
+            return 1 ;;
+    esac
     run="$HOME/.orca-backups/$RESTORE_RUN"
     if [ ! -d "$run" ]; then
         echo "unknown run: $RESTORE_RUN (--restore with no argument lists them)" >&2
@@ -462,6 +486,18 @@ restore() {
     echo "Restoring from $run/"
     LEFT=0
     while IFS="$TAB" read -r name origin; do
+        # Fields are checked, not trusted: a name with `/` (or a dotted one)
+        # would read outside the run, and a relative origin would land
+        # wherever --restore happens to be run from. An origin outside $HOME
+        # is fine - a custom CLAUDE_HOME or ORCA_BIN lives there.
+        ok=1
+        case "$name" in ""|*/*|.*) ok=0 ;; esac
+        case "$origin" in /*) ;; *) ok=0 ;; esac
+        if [ "$ok" = 0 ]; then
+            echo "    ! bad manifest line, not restored: $name -> $origin"
+            LEFT=$((LEFT + 1))
+            continue
+        fi
         # The whole pre-install settings.json: --uninstall already removed the
         # hook entry surgically, and anything else in here is a manual merge -
         # a blind copy would revert every setting changed since.
@@ -509,7 +545,7 @@ case "$STYLE" in
    claude) install_claude ;;
    agents) install_agents ;;
 esac
-[ -n "$BACKUP_DIR" ] && echo "replaced files moved to $BACKUP_DIR (--restore $TS puts them back)"
+[ -n "$BACKUP_DIR" ] && echo "replaced files moved to $BACKUP_DIR (after --uninstall, --restore $TS puts them back)"
 # The checkout is the version record: the tag HEAD sits on (a pinned
 # install), else the commit (a development checkout). Only the checkout's
 # OWN .git counts: a tarball (no .git) unpacked inside some other repository

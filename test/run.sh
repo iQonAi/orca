@@ -974,7 +974,7 @@ wassert 'manifest: the backup copies hold the previous contents under their numb
   bash -c "grep -q 'previous agent' '$IM1/.orca-backups/$M1_RUN/01-orca.md' \
         && grep -q 'previous hook' '$IM1/.orca-backups/$M1_RUN/02-orca-start-watcher.sh' \
         && grep -q 'previous watcher' '$IM1/.orca-backups/$M1_RUN/03-gh-watch.sh'"
-printf '%s' "$OUTM1" | grep -qF "replaced files moved to $IM1/.orca-backups/$M1_RUN (--restore $M1_RUN puts them back)" \
+printf '%s' "$OUTM1" | grep -qF "replaced files moved to $IM1/.orca-backups/$M1_RUN (after --uninstall, --restore $M1_RUN puts them back)" \
   && M1_SAID=1 || M1_SAID=0
 wassert 'manifest: install names the run and how to put it back' test "$M1_SAID" = 1
 # The settings.json edit starts from the backup copy, not from an empty file:
@@ -1160,6 +1160,147 @@ UNOUT5="$(HOME= sh "$INSTALL_SH" --restore </dev/null 2>&1)"; RCR9=$?
 wassert 'restore: empty HOME exits 1' test "$RCR9" -eq 1
 printf '%s' "$UNOUT5" | grep -q 'refusing to restore' && R9_REFUSED=1 || R9_REFUSED=0
 wassert 'restore: empty HOME says why it refused' test "$R9_REFUSED" = 1
+
+# one action per run, and a flag is never a run name: `--restore --uninstall`
+# used to take `--uninstall` as the run name, and `--uninstall --restore`
+# silently let the last flag win. ORCA_STYLE is set so a fall-through would
+# INSTALL and be caught, not exit 2 down the no-style path.
+IM12="$INST_TMP/m12"; mkdir -p "$IM12"
+OUTA1="$(ORCA_STYLE=claude HOME="$IM12" sh "$INSTALL_SH" --restore --uninstall </dev/null 2>&1)"; RCA1=$?
+wassert 'install: --restore --uninstall exits 2' test "$RCA1" -eq 2
+printf '%s' "$OUTA1" | grep -qF 'use one of --uninstall, --restore' && A1_SAID=1 || A1_SAID=0
+wassert 'install: --restore --uninstall names the conflict' test "$A1_SAID" = 1
+wassert 'install: --restore --uninstall installs nothing' test ! -d "$IM12/.claude"
+ORCA_STYLE=claude HOME="$IM12" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+OUTA2="$(HOME="$IM12" sh "$INSTALL_SH" --uninstall --restore </dev/null 2>&1)"; RCA2=$?
+wassert 'install: --uninstall --restore exits 2' test "$RCA2" -eq 2
+printf '%s' "$OUTA2" | grep -qF 'use one of --uninstall, --restore' && A2_SAID=1 || A2_SAID=0
+wassert 'install: --uninstall --restore names the conflict' test "$A2_SAID" = 1
+wassert 'install: --uninstall --restore uninstalls nothing' test -L "$IM12/.claude/agents/orca.md"
+OUTA3="$(HOME="$IM12" sh "$INSTALL_SH" --restore --uninstal </dev/null 2>&1)"; RCA3=$?
+wassert 'install: --restore --uninstal exits 2' test "$RCA3" -eq 2
+printf '%s' "$OUTA3" | grep -qF 'unrecognized option: --uninstal' && A3_SAID=1 || A3_SAID=0
+wassert 'install: a flag after --restore is an unrecognized option, not a run name' test "$A3_SAID" = 1
+
+# the run is a directory NAME: `..` and `x/..` would reach a MANIFEST outside
+# ~/.orca-backups/. One is planted where each spelling resolves.
+IM13="$INST_TMP/m13"; mkdir -p "$IM13/.orca-backups/2020/x"
+printf 'planted\t%s\n' "$IM13/pwned" >"$IM13/MANIFEST"; printf 'payload\n' >"$IM13/planted"
+printf 'planted\t%s\n' "$IM13/pwned2" >"$IM13/.orca-backups/2020/x/MANIFEST"
+printf 'payload\n' >"$IM13/.orca-backups/2020/x/planted"
+OUTR12="$(HOME="$IM13" sh "$INSTALL_SH" --restore .. </dev/null 2>&1)"; RCR12=$?
+wassert 'restore: a run name of .. exits non-zero' test "$RCR12" -ne 0
+printf '%s' "$OUTR12" | grep -qF 'invalid run name: ..' && R12_SAID=1 || R12_SAID=0
+wassert 'restore: a run name of .. is refused as a name' test "$R12_SAID" = 1
+wassert 'restore: a run name of .. writes nothing' test ! -e "$IM13/pwned"
+OUTR13="$(HOME="$IM13" sh "$INSTALL_SH" --restore 2020/x </dev/null 2>&1)"; RCR13=$?
+wassert 'restore: a run name with a slash exits non-zero' test "$RCR13" -ne 0
+printf '%s' "$OUTR13" | grep -qF 'invalid run name: 2020/x' && R13_SAID=1 || R13_SAID=0
+wassert 'restore: a run name with a slash is refused as a name' test "$R13_SAID" = 1
+wassert 'restore: a run name with a slash writes nothing' test ! -e "$IM13/pwned2"
+
+# manifest fields are checked, not trusted. A name with `/` reads outside the
+# run, an empty name (a blank line) names nothing, and a relative origin
+# lands wherever --restore is run from - so these run from $INST_TMP and the
+# relative case asserts nothing appeared there. Each is refused, counted in
+# the exit status, and skipped; a good line after a bad one still goes back.
+IM14="$INST_TMP/m14"
+mkdir -p "$IM14/.orca-backups/r1" "$IM14/.orca-backups/r2" "$IM14/.orca-backups/r3" "$IM14/.orca-backups/r4"
+printf 'payload\n' >"$IM14/planted"
+printf '../../planted\t%s\n' "$IM14/pwned3" >"$IM14/.orca-backups/r1/MANIFEST"
+printf '\n' >"$IM14/.orca-backups/r2/MANIFEST"
+printf '01-x\trelative/pwned5\n' >"$IM14/.orca-backups/r3/MANIFEST"
+printf 'payload\n' >"$IM14/.orca-backups/r3/01-x"
+printf '../../planted\t%s\n01-good\t%s\n' "$IM14/pwned6" "$IM14/restored-ok" >"$IM14/.orca-backups/r4/MANIFEST"
+printf 'good\n' >"$IM14/.orca-backups/r4/01-good"
+OUTR14="$( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r1 </dev/null 2>&1 )"; RCR14=$?
+wassert 'restore: a manifest name with a slash exits non-zero' test "$RCR14" -ne 0
+printf '%s' "$OUTR14" | grep -qF '! bad manifest line, not restored: ../../planted' && R14_SAID=1 || R14_SAID=0
+wassert 'restore: a manifest name with a slash is reported as a bad line' test "$R14_SAID" = 1
+wassert 'restore: a manifest name with a slash writes nothing' test ! -e "$IM14/pwned3"
+OUTR15="$( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r2 </dev/null 2>&1 )"; RCR15=$?
+wassert 'restore: an empty manifest name exits non-zero' test "$RCR15" -ne 0
+printf '%s' "$OUTR15" | grep -qF '! bad manifest line' && R15_SAID=1 || R15_SAID=0
+wassert 'restore: an empty manifest name is reported as a bad line' test "$R15_SAID" = 1
+( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r3 </dev/null >/dev/null 2>&1 ); RCR16=$?
+wassert 'restore: a relative manifest origin exits non-zero' test "$RCR16" -ne 0
+wassert 'restore: a relative manifest origin writes nothing, not even under the cwd' \
+  test ! -e "$INST_TMP/relative/pwned5"
+( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r4 </dev/null >/dev/null 2>&1 ); RCR17=$?
+wassert 'restore: one bad line still fails the run' test "$RCR17" -ne 0
+wassert 'restore: a bad line is skipped and the good line after it still goes back' \
+  bash -c "test ! -e '$IM14/pwned6' && grep -q good '$IM14/restored-ok'"
+
+# a relative CLAUDE_HOME: the origin is recorded absolute, anchored to the
+# directory install ran from, so --restore run from anywhere else still
+# lands it there and never under its own cwd.
+IM8="$INST_TMP/m8"; mkdir -p "$IM8/cwd/relch/agents"
+printf 'previous agent\n' >"$IM8/cwd/relch/agents/orca.md"
+( cd "$IM8/cwd" && ORCA_STYLE=claude HOME="$IM8" CLAUDE_HOME=relch sh "$INSTALL_SH" </dev/null >/dev/null 2>&1 )
+M8_RUN="$(ls "$IM8/.orca-backups" 2>/dev/null)"
+printf '01-orca.md\t%s\n' "$IM8/cwd/relch/agents/orca.md" >"$INST_TMP/m8-manifest.expected"
+wassert 'manifest: a relative CLAUDE_HOME is recorded as an absolute origin' \
+  cmp -s "$INST_TMP/m8-manifest.expected" "$IM8/.orca-backups/$M8_RUN/MANIFEST"
+( cd "$IM8/cwd" && HOME="$IM8" CLAUDE_HOME=relch sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1 )
+( cd "$INST_TMP" && HOME="$IM8" sh "$INSTALL_SH" --restore "$M8_RUN" </dev/null >/dev/null 2>&1 )
+wassert 'restore: a relative-CLAUDE_HOME backup goes back where it came from, not under the cwd' \
+  bash -c "grep -q 'previous agent' '$IM8/cwd/relch/agents/orca.md' && test ! -e '$INST_TMP/relch'"
+
+# a backed-up symlink returns as a symlink with the same target - the
+# common case is a link left by an install from another checkout. A plain
+# cp would follow it and put back a regular file holding the target's bytes.
+IM9="$INST_TMP/m9"; mkdir -p "$IM9/.claude/agents" "$IM9/mine"
+printf 'my agent\n' >"$IM9/mine/agent.md"
+ln -s "$IM9/mine/agent.md" "$IM9/.claude/agents/orca.md"
+ORCA_STYLE=claude HOME="$IM9" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IM9" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+M9_RUN="$(ls "$IM9/.orca-backups" 2>/dev/null)"
+HOME="$IM9" sh "$INSTALL_SH" --restore "$M9_RUN" </dev/null >/dev/null 2>&1; RCR18=$?
+wassert 'restore: a backed-up symlink exits 0' test "$RCR18" -eq 0
+wassert 'restore: a backed-up symlink comes back as a symlink, not a copy of its target' \
+  test -L "$IM9/.claude/agents/orca.md"
+wassert 'restore: the restored symlink keeps its original target' \
+  test "$(readlink "$IM9/.claude/agents/orca.md")" = "$IM9/mine/agent.md"
+
+# a dangling symlink at an origin is still "something there": -e alone
+# would miss it, and the copy would then write over or through it.
+IM11="$INST_TMP/m11"; mkdir -p "$IM11/.claude/hooks"
+printf 'previous hook\n' >"$IM11/.claude/hooks/orca-start-watcher.sh"
+ORCA_STYLE=claude HOME="$IM11" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IM11" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+ln -s /nonexistent-orca-target "$IM11/.claude/hooks/orca-start-watcher.sh"
+M11_RUN="$(ls "$IM11/.orca-backups" 2>/dev/null)"
+OUTR19="$(HOME="$IM11" sh "$INSTALL_SH" --restore "$M11_RUN" </dev/null 2>&1)"; RCR19=$?
+wassert 'restore: a dangling symlink at an origin exits 0' test "$RCR19" -eq 0
+wassert 'restore: a dangling symlink at an origin is left untouched' \
+  test "$(readlink "$IM11/.claude/hooks/orca-start-watcher.sh")" = /nonexistent-orca-target
+printf '%s' "$OUTR19" | grep -qF "skipped: exists - $IM11/.claude/hooks/orca-start-watcher.sh" \
+  && R19_SKIP=1 || R19_SKIP=0
+wassert 'restore: a dangling symlink at an origin is reported as skipped: exists' test "$R19_SKIP" = 1
+
+# Best effort, not fail-fast: a copy that fails is named, the sweep goes on,
+# and the exit status reports it - the mirror of uninstall's unremovable
+# file above (root bypasses mode bits, so skip there).
+IM10="$INST_TMP/m10"; mkdir -p "$IM10/.claude/agents" "$IM10/.claude/hooks"
+printf 'previous agent\n' >"$IM10/.claude/agents/orca.md"
+printf 'previous hook\n'  >"$IM10/.claude/hooks/orca-start-watcher.sh"
+ORCA_STYLE=claude HOME="$IM10" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IM10" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+M10_RUN="$(ls "$IM10/.orca-backups" 2>/dev/null)"
+chmod 555 "$IM10/.claude/agents"
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf 'skip: restore: unwritable origin directory (root bypasses mode bits)\n'
+else
+  OUTR20="$(HOME="$IM10" sh "$INSTALL_SH" --restore "$M10_RUN" </dev/null 2>&1)"; RCR20=$?
+  wassert 'restore: a copy that fails exits 1, not 0' test "$RCR20" -eq 1
+  printf '%s' "$OUTR20" | grep -qF "! could not restore $IM10/.claude/agents/orca.md" && R20_SAID=1 || R20_SAID=0
+  wassert 'restore: the failed copy is named on stdout' test "$R20_SAID" = 1
+  wassert 'restore: the sweep continues past the failed copy' \
+    bash -c "grep -q 'previous hook' '$IM10/.claude/hooks/orca-start-watcher.sh'"
+  printf '%s' "$OUTR20" | grep -q 'item(s) could not be restored' && R20_SUMMARY=1 || R20_SUMMARY=0
+  wassert 'restore: reports how much could not be restored' test "$R20_SUMMARY" = 1
+fi
+chmod u+rwx "$IM10/.claude/agents"
 
 # ---------------------------------------------------------------------------
 

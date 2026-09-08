@@ -120,9 +120,9 @@ status is non-zero if anything remains, so re-running after fixing the cause
 Deliberately left alone:
 
 - **Your backups.** `~/.orca-backups/<timestamp>/` is never touched, and
-  never restored from blind — which run would it pick? Uninstall prints the
-  path; putting a run back is a separate, explicit step (see
-  [Restore](#restore)).
+  never restored from blind: there can be several runs, and only you know
+  which one. Uninstall prints the path; putting a run back is a separate,
+  explicit step (see [Restore](#restore)).
 - **Everything else in `settings.json`.** Only entries equal to the one the
   installer wrote are dropped; other `SessionStart` entries, other hook
   types, and unrelated keys survive. An entry you merged the orca command
