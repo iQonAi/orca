@@ -15,17 +15,23 @@ ORCA_REF="${ORCA_REF:-v0.1.0}"
 # would silently ignore --uninstall and INSTALL instead - the documented
 # uninstall command doing the exact opposite of what it says.
 ACTION=install
-for arg in "$@"; do
-    case "$arg" in
+RESTORE_RUN=
+while [ $# -gt 0 ]; do
+    case "$1" in
         --uninstall) ACTION=uninstall ;;
+        # Alone it lists the backup runs; with a run name it puts that run back.
+        --restore)
+            ACTION=restore
+            if [ $# -gt 1 ]; then shift; RESTORE_RUN=$1; fi ;;
         # Rejected rather than ignored: a typo'd flag must not silently run
         # the opposite action of the one that was asked for.
-        *) echo "unrecognized option: $arg" >&2; exit 2 ;;
+        *) echo "unrecognized option: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
-if [ "$ACTION" = uninstall ]; then
-    # Every uninstall target is built from $HOME, so it is normalized and
+if [ "$ACTION" != install ]; then
+    # Every uninstall/restore target is built from $HOME, so it is normalized and
     # vetted HERE - before the bootstrap block below builds its first path
     # from it. `cd`+`pwd` collapses the spellings a pattern match misses
     # (`/.`, `/tmp/..`, a relative or non-existent $HOME) to one canonical
@@ -44,7 +50,7 @@ if [ "$ACTION" = uninstall ]; then
     fi
     case "$HOME_DIR" in
         ""|/|//)
-            echo "refusing to uninstall: HOME must be a usable directory, not '${HOME-<unset>}'" >&2
+            echo "refusing to $ACTION: HOME must be a usable directory, not '${HOME-<unset>}'" >&2
             exit 1 ;;
     esac
     HOME=$HOME_DIR
@@ -78,8 +84,8 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
        "~") ORCA_REPO="$HOME" ;;
        "~/"*) ORCA_REPO="$HOME/${ORCA_REPO#"~/"}" ;;
    esac
-   if [ "$ACTION" = uninstall ]; then
-       # A teardown never fetches and never re-executes. Not fetching,
+   if [ "$ACTION" != install ]; then
+       # Teardown and restore never fetch and never re-execute. Not fetching,
        # because uninstall that needs the network (or git) is broken by
        # design, and because `pull` would mutate the very checkout that
        # copy-mode provenance compares against - silently turning orca's own
@@ -144,12 +150,23 @@ resolve_style() {
 
 TS=$(date +%Y%m%d-%H%M%S)
 BACKUP_DIR=
+BACKUP_N=0
+BACKUP_DST=
 
 backup() { # move an existing target aside, once-per-run dir
     [ -e "$1" ] || [ -L "$1" ] || return 0
     [ -n "$BACKUP_DIR" ] || { BACKUP_DIR="$HOME/.orca-backups/$TS"; mkdir -p "$BACKUP_DIR"; }
-    mv "$1" "$BACKUP_DIR/"
-    echo "backup: $1 -> $BACKUP_DIR/"
+    # Numbered, so two targets sharing a basename can never overwrite each
+    # other in the run directory, and recorded in MANIFEST as
+    # `<name><TAB><origin path>` so --restore can put each one back exactly
+    # where it came from (AGENTS.md does not even share a basename with the
+    # source it was installed from). The destination is left in BACKUP_DST
+    # for the caller.
+    BACKUP_N=$((BACKUP_N + 1))
+    BACKUP_DST="$BACKUP_DIR/$(printf '%02d' "$BACKUP_N")-${1##*/}"
+    mv "$1" "$BACKUP_DST"
+    printf '%s\t%s\n' "${BACKUP_DST##*/}" "$1" >> "$BACKUP_DIR/MANIFEST"
+    echo "backup: $1 -> $BACKUP_DST"
 }
 
 install_one() { # $1 src, $2 dst - link by default, ORCA_MODE=copy to copy
@@ -199,7 +216,7 @@ wire_claude_hook() {
    fi
   # backup() moved it; work on a restored copy. A file we just created has
   # nothing worth backing up.
-  if [ "$created" = 0 ]; then backup "$1"; cp "$BACKUP_DIR/settings.json" "$1"; fi
+  if [ "$created" = 0 ]; then backup "$1"; cp "$BACKUP_DST" "$1"; fi
  tmp=$(mktemp)
  jq --argjson e "$entry" '.hooks.SessionStart = ((.hooks.SessionStart // []) + [$e])' "$1" > "$tmp"
  mv "$tmp" "$1"
@@ -381,10 +398,95 @@ uninstall() {
     uninstall_agents
     if [ -d "$HOME/.orca-backups" ]; then
         echo "  note: files the installer replaced are still in $HOME/.orca-backups/"
-        echo "        (untouched by uninstall - restore the ones you want by hand)."
+        echo "        (untouched by uninstall - list the runs with --restore, put one"
+        echo "        back with --restore <run>)."
     fi
     if [ "$LEFT" -gt 0 ]; then
         echo "done, but $LEFT item(s) are still installed - see the ! lines above."
+        return 1
+    fi
+    echo "done."
+}
+
+# --- restore -----------------------------------------------------------------
+#
+# Puts back what install moved aside, from ONE run under ~/.orca-backups/.
+# Opt-in and explicit: uninstall never restores blind (which run would it
+# pick?), so the user names the run, and nothing already at an origin path
+# is ever overwritten. A run made before MANIFEST existed has no record of
+# where its files came from; it is reported, not guessed at.
+
+TAB=$(printf '\t')
+
+list_runs() {
+    root="$HOME/.orca-backups"
+    if [ ! -d "$root" ]; then
+        echo "no backups: $root/ does not exist"
+        return 0
+    fi
+    echo "backup runs in $root/ (put one back with --restore <run>):"
+    found=0
+    for run in "$root"/*/; do
+        [ -d "$run" ] || continue   # the unmatched glob itself
+        run=${run%/}
+        found=1
+        echo "  ${run##*/}"
+        if [ -f "$run/MANIFEST" ]; then
+            while IFS="$TAB" read -r name origin; do
+                echo "    $name -> $origin"
+            done < "$run/MANIFEST"
+        else
+            echo "    no manifest: restore by hand from $run/"
+        fi
+    done
+    [ "$found" = 1 ] || echo "  (none)"
+}
+
+restore() {
+    # $HOME was normalized and vetted at the top, as for uninstall. Best
+    # effort for the same reason: every entry is attempted, what could not
+    # be put back is named as it happens, and the exit status reports it.
+    if [ -z "$RESTORE_RUN" ]; then
+        list_runs
+        return 0
+    fi
+    run="$HOME/.orca-backups/$RESTORE_RUN"
+    if [ ! -d "$run" ]; then
+        echo "unknown run: $RESTORE_RUN (--restore with no argument lists them)" >&2
+        return 1
+    fi
+    if [ ! -f "$run/MANIFEST" ]; then
+        echo "no manifest in $run/ - restore by hand" >&2
+        return 1
+    fi
+    echo "Restoring from $run/"
+    LEFT=0
+    while IFS="$TAB" read -r name origin; do
+        # The whole pre-install settings.json: --uninstall already removed the
+        # hook entry surgically, and anything else in here is a manual merge -
+        # a blind copy would revert every setting changed since.
+        if [ "${origin##*/}" = settings.json ]; then
+            echo "    not restored: $run/$name"
+            echo "      (settings.json is never restored: --uninstall removes the hook"
+            echo "       entry it wired; merge anything else from that copy by hand)"
+            continue
+        fi
+        if [ -e "$origin" ] || [ -L "$origin" ]; then
+            echo "    skipped: exists - $origin"
+            continue
+        fi
+        # -RP: a backed-up symlink goes back as a symlink and a file as a
+        # file, the inverse of the mv that moved it aside. The parent may be
+        # gone: uninstall rmdirs an emptied ~/.config/orca.
+        if mkdir -p "$(dirname -- "$origin")" && cp -RP "$run/$name" "$origin"; then
+            echo "    restored: $origin"
+        else
+            echo "    ! could not restore $origin"
+            LEFT=$((LEFT + 1))
+        fi
+    done < "$run/MANIFEST"
+    if [ "$LEFT" -gt 0 ]; then
+        echo "done, but $LEFT item(s) could not be restored - see the ! lines above."
         return 1
     fi
     echo "done."
@@ -396,6 +498,10 @@ if [ "$ACTION" = uninstall ]; then
     uninstall || exit 1
     exit 0
 fi
+if [ "$ACTION" = restore ]; then
+    restore || exit 1
+    exit 0
+fi
 
 resolve_style
 echo "Installing orca ($STYLE style) from $ORCA_REPO"
@@ -403,7 +509,7 @@ case "$STYLE" in
    claude) install_claude ;;
    agents) install_agents ;;
 esac
-[ -n "$BACKUP_DIR" ] && echo "replaced files moved to $BACKUP_DIR"
+[ -n "$BACKUP_DIR" ] && echo "replaced files moved to $BACKUP_DIR (--restore $TS puts them back)"
 # The checkout is the version record: the tag HEAD sits on (a pinned
 # install), else the commit (a development checkout). Only the checkout's
 # OWN .git counts: a tarball (no .git) unpacked inside some other repository

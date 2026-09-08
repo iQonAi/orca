@@ -412,7 +412,7 @@ wassert 'install: copy mode exits 0' test "$RC5" -eq 0
 wassert 'install: copy mode installs a regular file, not a link' \
   bash -c "test -f '$IH4/.claude/agents/orca.md' && test ! -L '$IH4/.claude/agents/orca.md'"
 wassert 'install: pre-existing file was backed up' \
-  bash -c "ls '$IH4'/.orca-backups/*/orca.md >/dev/null 2>&1"
+  bash -c "ls '$IH4'/.orca-backups/*/*-orca.md >/dev/null 2>&1"
 
 # copy-mode rerun is also a no-op (identical files short-circuit before backup)
 OUT6="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null 2>&1)"; RC6=$?
@@ -759,10 +759,12 @@ printf 'previous agent\n' >"$IH11/.claude/agents/orca.md"
 ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH11" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 OUTU4="$(HOME="$IH11" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
 wassert 'uninstall: the pre-install backup is still on disk afterwards' \
-  bash -c "grep -q 'previous agent' '$IH11'/.orca-backups/*/orca.md"
+  bash -c "grep -q 'previous agent' '$IH11'/.orca-backups/*/*-orca.md"
 printf '%s' "$OUTU4" | grep -q '.orca-backups' && UN_BACKUP_NOTE=1 || UN_BACKUP_NOTE=0
 wassert 'uninstall: points at the backup dir instead of restoring blind' \
   test "$UN_BACKUP_NOTE" = 1
+printf '%s' "$OUTU4" | grep -q -- '--restore <run>' && UN_RESTORE_NOTE=1 || UN_RESTORE_NOTE=0
+wassert 'uninstall: the backup note points at --restore' test "$UN_RESTORE_NOTE" = 1
 
 # Without jq, uninstall must change no JSON at all: it prints the entry to
 # delete by hand, exactly as install prints the entry to add by hand. Editing
@@ -936,6 +938,228 @@ wassert 'install: an unrecognized option exits 2' test "$RCU8" -eq 2
 printf '%s' "$UNOUT3" | grep -q 'unrecognized option: --uninstal' && UN_BADOPT=1 || UN_BADOPT=0
 wassert 'install: an unrecognized option names the option it rejected' test "$UN_BADOPT" = 1
 wassert 'install: an unrecognized option installs nothing' test ! -d "$IH12/.claude"
+
+# ---------------------------------------------------------------------------
+# install.sh — backup manifest and --restore
+#
+# Every file backup() moves aside gets a numbered name in the run directory
+# and a MANIFEST line `<name><TAB><absolute origin>`, so a later --restore
+# can put it back exactly where it came from. --restore is opt-in: it names
+# one run, copies back only onto absent paths, never overwrites, and never
+# touches settings.json. Hermetic like everything above: temp HOMEs, no
+# network, and the piped case runs against the same tripwire checkout.
+
+# claude style over a HOME where every install target already exists, plus a
+# settings.json that needs the hook wired: four entries, in install order,
+# each naming the absolute path it came from. cmp against the exact expected
+# file, so the numbering, the tab and the origins are all asserted at once.
+IM1="$INST_TMP/m1"; mkdir -p "$IM1/.claude/agents" "$IM1/.claude/hooks" "$IM1/.claude/scripts"
+printf 'previous agent\n'   >"$IM1/.claude/agents/orca.md"
+printf 'previous hook\n'    >"$IM1/.claude/hooks/orca-start-watcher.sh"
+printf 'previous watcher\n' >"$IM1/.claude/scripts/gh-watch.sh"
+printf '{\n  "model": "opus",\n  "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "mine.sh"}]}]}\n}\n' \
+  >"$IM1/.claude/settings.json"
+cp "$IM1/.claude/settings.json" "$INST_TMP/m1-settings.before"
+OUTM1="$(ORCA_STYLE=claude HOME="$IM1" sh "$INSTALL_SH" </dev/null 2>&1)"; RCM1=$?
+wassert 'manifest: (setup) claude-style install over existing files exits 0' test "$RCM1" -eq 0
+M1_RUN="$(ls "$IM1/.orca-backups" 2>/dev/null)"
+wassert 'manifest: one install makes exactly one run directory' \
+  test "$(printf '%s\n' "$M1_RUN" | grep -c .)" -eq 1
+printf '01-orca.md\t%s\n02-orca-start-watcher.sh\t%s\n03-gh-watch.sh\t%s\n04-settings.json\t%s\n' \
+  "$IM1/.claude/agents/orca.md" "$IM1/.claude/hooks/orca-start-watcher.sh" \
+  "$IM1/.claude/scripts/gh-watch.sh" "$IM1/.claude/settings.json" >"$INST_TMP/m1-manifest.expected"
+wassert 'manifest: claude style records numbered names and absolute origins, tab-separated' \
+  cmp -s "$INST_TMP/m1-manifest.expected" "$IM1/.orca-backups/$M1_RUN/MANIFEST"
+wassert 'manifest: the backup copies hold the previous contents under their numbered names' \
+  bash -c "grep -q 'previous agent' '$IM1/.orca-backups/$M1_RUN/01-orca.md' \
+        && grep -q 'previous hook' '$IM1/.orca-backups/$M1_RUN/02-orca-start-watcher.sh' \
+        && grep -q 'previous watcher' '$IM1/.orca-backups/$M1_RUN/03-gh-watch.sh'"
+printf '%s' "$OUTM1" | grep -qF "replaced files moved to $IM1/.orca-backups/$M1_RUN (--restore $M1_RUN puts them back)" \
+  && M1_SAID=1 || M1_SAID=0
+wassert 'manifest: install names the run and how to put it back' test "$M1_SAID" = 1
+# The settings.json edit starts from the backup copy, not from an empty file:
+# the backup IS the pre-install file byte-for-byte, and the wired file still
+# carries everything that was in it. This is the caller that used to assume
+# $BACKUP_DIR/settings.json - a name that no longer exists.
+wassert 'manifest: the settings.json backup is the pre-install file byte-for-byte' \
+  cmp -s "$INST_TMP/m1-settings.before" "$IM1/.orca-backups/$M1_RUN/04-settings.json"
+wassert 'manifest: the settings.json edit kept the user model key' \
+  test "$(jq -r .model "$IM1/.claude/settings.json")" = opus
+wassert 'manifest: the settings.json edit kept the user SessionStart entry beside orca' \
+  test "$(jq '.hooks.SessionStart | length' "$IM1/.claude/settings.json")" = 2
+
+# agents style: the playbook's destination is AGENTS.md, which shares no
+# basename with the orca.md it is installed from - the case that made a
+# basename-only backup impossible to restore.
+IM2="$INST_TMP/m2"; mkdir -p "$IM2/.local/bin" "$IM2/.config/orca"
+printf 'previous watcher\n'  >"$IM2/.local/bin/gh-watch"
+printf 'previous playbook\n' >"$IM2/.config/orca/AGENTS.md"
+ORCA_STYLE=agents HOME="$IM2" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+M2_RUN="$(ls "$IM2/.orca-backups" 2>/dev/null)"
+printf '01-gh-watch\t%s\n02-AGENTS.md\t%s\n' "$IM2/.local/bin/gh-watch" "$IM2/.config/orca/AGENTS.md" \
+  >"$INST_TMP/m2-manifest.expected"
+wassert 'manifest: agents style records its own destinations (AGENTS.md, not orca.md)' \
+  cmp -s "$INST_TMP/m2-manifest.expected" "$IM2/.orca-backups/$M2_RUN/MANIFEST"
+
+# custom CLAUDE_HOME: the origin is the custom path, never the ~/.claude
+# default; the run directory itself still lives under $HOME.
+IM3="$INST_TMP/m3"; CM3="$INST_TMP/cm3"; mkdir -p "$IM3" "$CM3/agents"
+printf 'previous agent\n' >"$CM3/agents/orca.md"
+ORCA_STYLE=claude HOME="$IM3" CLAUDE_HOME="$CM3" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+M3_RUN="$(ls "$IM3/.orca-backups" 2>/dev/null)"
+printf '01-orca.md\t%s\n' "$CM3/agents/orca.md" >"$INST_TMP/m3-manifest.expected"
+wassert 'manifest: a custom CLAUDE_HOME is recorded as the origin, not ~/.claude' \
+  cmp -s "$INST_TMP/m3-manifest.expected" "$IM3/.orca-backups/$M3_RUN/MANIFEST"
+
+# Two files sharing a basename. No two install targets do today, so the
+# collision the numbering exists for is proven on backup() itself: the block
+# from TS= through the end of the function is lifted out of install.sh and
+# driven directly under a temp HOME.
+IM4="$INST_TMP/m4"; mkdir -p "$IM4/a" "$IM4/b"
+printf 'from a\n' >"$IM4/a/same.md"; printf 'from b\n' >"$IM4/b/same.md"
+BACKUP_UNIT="$(sed -n '/^TS=/,/^}/p' "$INSTALL_SH")"
+HOME="$IM4" sh -c "set -eu; $BACKUP_UNIT; backup '$IM4/a/same.md'; backup '$IM4/b/same.md'" \
+  >/dev/null 2>&1; RCM4=$?
+wassert 'manifest: (setup) backup() ran on two files sharing a basename' test "$RCM4" -eq 0
+M4_RUN="$(ls "$IM4/.orca-backups" 2>/dev/null)"
+wassert 'manifest: two files sharing a basename get distinct names, neither overwritten' \
+  bash -c "grep -q 'from a' '$IM4/.orca-backups/$M4_RUN/01-same.md' \
+        && grep -q 'from b' '$IM4/.orca-backups/$M4_RUN/02-same.md'"
+printf '01-same.md\t%s\n02-same.md\t%s\n' "$IM4/a/same.md" "$IM4/b/same.md" >"$INST_TMP/m4-manifest.expected"
+wassert 'manifest: each is mapped back to its own origin' \
+  cmp -s "$INST_TMP/m4-manifest.expected" "$IM4/.orca-backups/$M4_RUN/MANIFEST"
+
+# --restore <run>, claude style: install over existing files (m1 above),
+# uninstall, put the run back. The three files return with their previous
+# contents as regular files; settings.json is named and left exactly as
+# uninstall left it; the backup copies stay on disk.
+HOME="$IM1" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+cp "$IM1/.claude/settings.json" "$INST_TMP/m1-settings.after-uninstall"
+wassert 'restore: (setup) uninstall removed the installed files' \
+  bash -c "test ! -e '$IM1/.claude/agents/orca.md' && test ! -e '$IM1/.claude/hooks/orca-start-watcher.sh'"
+OUTR1="$(HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null 2>&1)"; RCR1=$?
+wassert 'restore: a known run exits 0' test "$RCR1" -eq 0
+wassert 'restore: absent files come back with their previous contents' \
+  bash -c "grep -q 'previous agent' '$IM1/.claude/agents/orca.md' \
+        && grep -q 'previous hook' '$IM1/.claude/hooks/orca-start-watcher.sh' \
+        && grep -q 'previous watcher' '$IM1/.claude/scripts/gh-watch.sh'"
+wassert 'restore: a restored file is a regular file, not a link into the backup' \
+  bash -c "test -f '$IM1/.claude/agents/orca.md' && test ! -L '$IM1/.claude/agents/orca.md'"
+wassert 'restore: settings.json is left exactly as uninstall left it' \
+  cmp -s "$INST_TMP/m1-settings.after-uninstall" "$IM1/.claude/settings.json"
+printf '%s' "$OUTR1" | grep -qF "not restored: $IM1/.orca-backups/$M1_RUN/04-settings.json" \
+  && R1_NAMED=1 || R1_NAMED=0
+wassert 'restore: names the settings.json backup it did not restore' test "$R1_NAMED" = 1
+printf '%s' "$OUTR1" | grep -q -- '--uninstall removes the hook' && R1_WHY=1 || R1_WHY=0
+wassert 'restore: says the hook entry is --uninstall business and the rest a manual merge' \
+  test "$R1_WHY" = 1
+wassert 'restore: the backup copies stay on disk (copy, not move)' \
+  bash -c "test -f '$IM1/.orca-backups/$M1_RUN/01-orca.md' && test -f '$IM1/.orca-backups/$M1_RUN/MANIFEST'"
+
+# a second restore of the same run finds everything in place: all skips, no
+# change, exit 0
+OUTR2="$(HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null 2>&1)"; RCR2=$?
+wassert 'restore: rerun exits 0' test "$RCR2" -eq 0
+# Anchored: an unanchored `restored:` also matches the `not restored:` line
+# that names the settings.json backup.
+printf '%s' "$OUTR2" | grep -qE '^ +restored:' && R2_CHANGED=1 || R2_CHANGED=0
+wassert 'restore: rerun restores nothing (everything is in place)' test "$R2_CHANGED" = 0
+
+# ...and an ABSENT settings.json is still not put back. With the file in
+# place the exists-check alone would skip it; this is the case that proves
+# the whole-file revert stays a manual step and not a side effect of a
+# missing path.
+mv "$IM1/.claude/settings.json" "$INST_TMP/m1-settings.aside"
+HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null >/dev/null 2>&1; RCR2B=$?
+wassert 'restore: an absent settings.json is still not restored' test ! -e "$IM1/.claude/settings.json"
+wassert 'restore: an absent settings.json is not an error' test "$RCR2B" -eq 0
+mv "$INST_TMP/m1-settings.aside" "$IM1/.claude/settings.json"
+
+# never overwrites: a file already at an origin path stays and is reported;
+# the absent files in the same run are still put back.
+IM5="$INST_TMP/m5"; mkdir -p "$IM5/.claude/agents" "$IM5/.claude/hooks"
+printf 'previous agent\n' >"$IM5/.claude/agents/orca.md"
+printf 'previous hook\n'  >"$IM5/.claude/hooks/orca-start-watcher.sh"
+ORCA_STYLE=claude HOME="$IM5" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+HOME="$IM5" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+printf 'mine now\n' >"$IM5/.claude/agents/orca.md"
+M5_RUN="$(ls "$IM5/.orca-backups" 2>/dev/null)"
+OUTR3="$(HOME="$IM5" sh "$INSTALL_SH" --restore "$M5_RUN" </dev/null 2>&1)"; RCR3=$?
+wassert 'restore: exits 0 when some origin paths already exist' test "$RCR3" -eq 0
+wassert 'restore: a file already at an origin path is never overwritten' \
+  bash -c "grep -q 'mine now' '$IM5/.claude/agents/orca.md'"
+printf '%s' "$OUTR3" | grep -qF "skipped: exists - $IM5/.claude/agents/orca.md" && R3_SKIP=1 || R3_SKIP=0
+wassert 'restore: reports the file it left alone as skipped: exists' test "$R3_SKIP" = 1
+wassert 'restore: the absent files in the same run are still put back' \
+  bash -c "grep -q 'previous hook' '$IM5/.claude/hooks/orca-start-watcher.sh'"
+
+# agents style, end to end: install over a user's own AGENTS.md and gh-watch,
+# uninstall (which rmdirs the emptied ~/.config/orca), restore. Both come
+# back, AGENTS.md under its own name, with the directory recreated.
+HOME="$IM2" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'restore: (setup) agents-style uninstall removed ~/.config/orca' test ! -d "$IM2/.config/orca"
+HOME="$IM2" sh "$INSTALL_SH" --restore "$M2_RUN" </dev/null >/dev/null 2>&1; RCR4=$?
+wassert 'restore: agents style exits 0' test "$RCR4" -eq 0
+wassert 'restore: AGENTS.md goes back under its own name, its directory recreated' \
+  bash -c "grep -q 'previous playbook' '$IM2/.config/orca/AGENTS.md'"
+wassert 'restore: the agents-style watcher goes back too' \
+  bash -c "grep -q 'previous watcher' '$IM2/.local/bin/gh-watch'"
+
+# an unknown run: non-zero, named, and nothing changes
+IM6="$INST_TMP/m6"; mkdir -p "$IM6"
+OUTR5="$(HOME="$IM6" sh "$INSTALL_SH" --restore 19700101-000000 </dev/null 2>&1)"; RCR5=$?
+wassert 'restore: an unknown run exits non-zero' test "$RCR5" -ne 0
+printf '%s' "$OUTR5" | grep -q 'unknown run: 19700101-000000' && R5_SAID=1 || R5_SAID=0
+wassert 'restore: an unknown run is named in the error' test "$R5_SAID" = 1
+wassert 'restore: an unknown run changes nothing' test -z "$(ls -A "$IM6")"
+
+# the no-argument form lists the runs and their manifest entries, and
+# restores nothing
+rm -f "$IM5/.claude/hooks/orca-start-watcher.sh"
+OUTR6="$(HOME="$IM5" sh "$INSTALL_SH" --restore </dev/null 2>&1)"; RCR6=$?
+wassert 'restore: the no-argument form exits 0' test "$RCR6" -eq 0
+printf '%s' "$OUTR6" | grep -qx "  $M5_RUN" && R6_RUN=1 || R6_RUN=0
+wassert 'restore: the no-argument form lists the run' test "$R6_RUN" = 1
+printf '%s' "$OUTR6" | grep -qF "01-orca.md -> $IM5/.claude/agents/orca.md" && R6_ENTRY=1 || R6_ENTRY=0
+wassert 'restore: the no-argument form lists each manifest entry with its origin' test "$R6_ENTRY" = 1
+wassert 'restore: the no-argument form restores nothing' \
+  test ! -e "$IM5/.claude/hooks/orca-start-watcher.sh"
+
+# a run made before the manifest existed: listed as not restorable, and
+# naming it exits non-zero without touching anything
+mkdir -p "$IM6/.orca-backups/20200101-000000"
+printf 'old\n' >"$IM6/.orca-backups/20200101-000000/orca.md"
+OUTR7="$(HOME="$IM6" sh "$INSTALL_SH" --restore </dev/null 2>&1)"
+printf '%s' "$OUTR7" | grep -q 'no manifest: restore by hand' && R7_SAID=1 || R7_SAID=0
+wassert 'restore: a run with no manifest is listed as restore by hand' test "$R7_SAID" = 1
+OUTR8="$(HOME="$IM6" sh "$INSTALL_SH" --restore 20200101-000000 </dev/null 2>&1)"; RCR8=$?
+wassert 'restore: a run with no manifest exits non-zero' test "$RCR8" -ne 0
+printf '%s' "$OUTR8" | grep -q 'no manifest' && R8_SAID=1 || R8_SAID=0
+wassert 'restore: a run with no manifest says so' test "$R8_SAID" = 1
+wassert 'restore: a run with no manifest changes nothing' test ! -d "$IM6/.claude"
+
+# Like --uninstall, --restore is parsed before the bootstrap block and never
+# clones, fetches or re-execs: the same tripwire checkout catches a regression.
+rm -f "$STALE/EXECUTED"
+OUTP3="$( cd "$INST_TMP" && \
+  ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$STALE" \
+  HOME="$IM5" sh -s -- --restore <"$INSTALL_SH" 2>&1 )"; RCP3=$?
+wassert 'restore: piped --restore exits 0' test "$RCP3" -eq 0
+wassert 'restore: piped --restore never re-execs the install.sh on disk' test ! -e "$STALE/EXECUTED"
+printf '%s' "$OUTP3" | grep -qx "  $M5_RUN" && P3_LISTED=1 || P3_LISTED=0
+wassert 'restore: piped --restore lists the runs' test "$P3_LISTED" = 1
+( cd "$INST_TMP" && ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$IM5/absent" \
+  HOME="$IM5" sh -s -- --restore "$M5_RUN" <"$INSTALL_SH" >/dev/null 2>&1 ); RCP4=$?
+wassert 'restore: piped --restore <run> with no checkout exits 0' test "$RCP4" -eq 0
+wassert 'restore: piped --restore clones nothing' test ! -e "$IM5/absent"
+wassert 'restore: piped --restore <run> puts the file back' \
+  bash -c "grep -q 'previous hook' '$IM5/.claude/hooks/orca-start-watcher.sh'"
+
+# the same $HOME guard as uninstall: refuse before building a single path
+UNOUT5="$(HOME= sh "$INSTALL_SH" --restore </dev/null 2>&1)"; RCR9=$?
+wassert 'restore: empty HOME exits 1' test "$RCR9" -eq 1
+printf '%s' "$UNOUT5" | grep -q 'refusing to restore' && R9_REFUSED=1 || R9_REFUSED=0
+wassert 'restore: empty HOME says why it refused' test "$R9_REFUSED" = 1
 
 # ---------------------------------------------------------------------------
 
