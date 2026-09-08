@@ -549,8 +549,14 @@ if command -v git >/dev/null 2>&1; then
   wassert 'install: piped bootstrap exits 0' test "$RC9" -eq 0
   wassert 'install: piped bootstrap cloned to ORCA_REPO' \
     test -f "$BOOT/clone/agents/orca.md"
+  # case, not grep: the prefix interpolates a mktemp path (`tmp.XXXXXXXXXX`),
+  # so as a regex its `.` would be a live BRE metacharacter, not a literal.
+  case "$(readlink "$BOOT/home/.claude/agents/orca.md")" in
+    "$BOOT/clone/"*) BOOT_FROM_CLONE=1 ;;
+    *) BOOT_FROM_CLONE=0 ;;
+  esac
   wassert 'install: piped bootstrap installed from the clone, not the cwd' \
-    bash -c "readlink '$BOOT/home/.claude/agents/orca.md' | grep -q '^$BOOT/clone/'"
+    test "$BOOT_FROM_CLONE" = 1
 else
   printf 'skip: install: piped bootstrap (git unavailable)\n'
 fi
@@ -798,7 +804,7 @@ wassert 'uninstall: a user-edited file at an install path is NOT removed' \
   bash -c "grep -q 'my own agent' '$IH8/.claude/agents/orca.md'"
 wassert 'uninstall: a symlink pointing outside an orca checkout is NOT removed' \
   test "$(readlink "$IH8/.claude/scripts/gh-watch.sh")" = /dev/null
-printf '%s' "$OUTU3" | grep -q "left alone: $IH8/.claude/agents/orca.md" \
+printf '%s' "$OUTU3" | grep -qF "left alone: $IH8/.claude/agents/orca.md" \
   && UN_SAID_LEFT=1 || UN_SAID_LEFT=0
 wassert 'uninstall: names on stdout what it left alone' test "$UN_SAID_LEFT" = 1
 # same run, same directory: a copy-mode file still byte-identical to the
@@ -1194,7 +1200,7 @@ wassert 'restore: an unknown run changes nothing' test -z "$(ls -A "$IM6")"
 rm -f "$IM5/.claude/hooks/orca-start-watcher.sh"
 OUTR6="$(HOME="$IM5" sh "$INSTALL_SH" --restore </dev/null 2>&1)"; RCR6=$?
 wassert 'restore: the no-argument form exits 0' test "$RCR6" -eq 0
-printf '%s' "$OUTR6" | grep -qx "  $M5_RUN" && R6_RUN=1 || R6_RUN=0
+printf '%s' "$OUTR6" | grep -qxF "  $M5_RUN" && R6_RUN=1 || R6_RUN=0
 wassert 'restore: the no-argument form lists the run' test "$R6_RUN" = 1
 printf '%s' "$OUTR6" | grep -qF "01-orca.md -> $IM5/.claude/agents/orca.md" && R6_ENTRY=1 || R6_ENTRY=0
 wassert 'restore: the no-argument form lists each manifest entry with its origin' test "$R6_ENTRY" = 1
@@ -1222,7 +1228,7 @@ OUTP3="$( cd "$INST_TMP" && \
   HOME="$IM5" sh -s -- --restore <"$INSTALL_SH" 2>&1 )"; RCP3=$?
 wassert 'restore: piped --restore exits 0' test "$RCP3" -eq 0
 wassert 'restore: piped --restore never re-execs the install.sh on disk' test ! -e "$STALE/EXECUTED"
-printf '%s' "$OUTP3" | grep -qx "  $M5_RUN" && P3_LISTED=1 || P3_LISTED=0
+printf '%s' "$OUTP3" | grep -qxF "  $M5_RUN" && P3_LISTED=1 || P3_LISTED=0
 wassert 'restore: piped --restore lists the runs' test "$P3_LISTED" = 1
 ( cd "$INST_TMP" && ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$IM5/absent" \
   HOME="$IM5" sh -s -- --restore "$M5_RUN" <"$INSTALL_SH" >/dev/null 2>&1 ); RCP4=$?
