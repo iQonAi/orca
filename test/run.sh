@@ -48,13 +48,15 @@ BASH_BIN="$(command -v bash)"
 # both URL-normalization paths), and one plain dir with no git remote.
 WATCHER_TMP="$(mktemp -d)"
 trap 'rm -rf "$WATCHER_TMP"' EXIT
-REPO_SSH="$WATCHER_TMP/ssh"; REPO_HTTPS="$WATCHER_TMP/https"; REPO_NONE="$WATCHER_TMP/none"
+REPO_SSH="$WATCHER_TMP/ssh"
+REPO_HTTPS="$WATCHER_TMP/https"
+REPO_NONE="$WATCHER_TMP/none"
 mkdir -p "$REPO_SSH" "$REPO_HTTPS" "$REPO_NONE"
-git -C "$REPO_SSH"   init -q
-git -C "$REPO_SSH"   remote add origin 'git@github.com:octocat/hello-world.git'
+git -C "$REPO_SSH" init -q
+git -C "$REPO_SSH" remote add origin 'git@github.com:octocat/hello-world.git'
 git -C "$REPO_HTTPS" init -q
 git -C "$REPO_HTTPS" remote add origin 'https://github.com/octocat/hello-world.git'
-git -C "$REPO_NONE"  init -q   # no remote configured
+git -C "$REPO_NONE" init -q # no remote configured
 
 # run_watcher <expected_exit> <stdout_substr|EMPTY> <desc> <json_payload>
 #   stdout_substr  substring that must appear on stdout, or the literal
@@ -193,11 +195,14 @@ run_watch() { run_watch_in "$GH_WATCH_STATE_DIR" "$1" "$2" "$3" "$5" "$4"; }
 
 # wassert <desc> <cmd...> — generic boolean case
 wassert() {
-  local desc="$1"; shift
+  local desc="$1"
+  shift
   if "$@"; then
-    printf 'ok:   %s\n' "$desc"; pass=$((pass + 1))
+    printf 'ok:   %s\n' "$desc"
+    pass=$((pass + 1))
   else
-    printf 'FAIL: %s\n      condition failed: %s\n' "$desc" "$*" >&2; fail=$((fail + 1))
+    printf 'FAIL: %s\n      condition failed: %s\n' "$desc" "$*" >&2
+    fail=$((fail + 1))
   fi
 }
 
@@ -206,15 +211,19 @@ wassert() {
 start_live() {
   PATH="$STUB_BIN:$PATH" GH_STUB_OUT='[{"n":1}]' "$BASH_BIN" "$WATCH_SCRIPT" "$1" >/dev/null 2>&1 &
   local pid=$! f i
-  disown "$pid" 2>/dev/null || true   # keep bash from printing job-kill notices
+  disown "$pid" 2>/dev/null || true # keep bash from printing job-kill notices
   LIVE_WATCHERS+=("$pid")
   f="$(watch_pidfile "$1")"
-  for i in $(seq 1 20); do [ -s "$f" ] && break; sleep 0.25; done
+  for i in $(seq 1 20); do
+    [ -s "$f" ] && break
+    sleep 0.25
+  done
   REPLY="$pid"
 }
 
 # A live watcher for repo A holds the pidfile -> a second launch is refused.
-start_live 'octocat/watch-a'; LIVE_A="$REPLY"
+start_live 'octocat/watch-a'
+LIVE_A="$REPLY"
 wassert 'gh-watch: first launch is running and owns the pidfile' \
   test "$(cat "$(watch_pidfile 'octocat/watch-a')" 2>/dev/null)" = "$LIVE_A"
 run_watch 3 'already running' \
@@ -236,7 +245,8 @@ wassert 'gh-watch: --status wrote no pidfile' \
   test ! -e "$(watch_pidfile 'octocat/watch-status-none')"
 
 # A DIFFERENT repo is not blocked by repo A's watcher (state is per repo).
-start_live 'octocat/watch-b'; LIVE_B="$REPLY"
+start_live 'octocat/watch-b'
+LIVE_B="$REPLY"
 wassert 'gh-watch: a second repo watches concurrently (own pidfile)' \
   test "$(cat "$(watch_pidfile 'octocat/watch-b')" 2>/dev/null)" = "$LIVE_B"
 wassert 'gh-watch: both repo watchers are alive at the same time' \
@@ -244,8 +254,11 @@ wassert 'gh-watch: both repo watchers are alive at the same time' \
 
 # Stale pidfile from a killed/crashed watcher must NOT wedge the script.
 DEAD_PID_SH="$GH_TMP/dead.sh"
-printf '#!/usr/bin/env bash\nexit 0\n' >"$DEAD_PID_SH"; chmod +x "$DEAD_PID_SH"
-"$BASH_BIN" "$DEAD_PID_SH" & DEAD_PID=$!; wait "$DEAD_PID" 2>/dev/null
+printf '#!/usr/bin/env bash\nexit 0\n' >"$DEAD_PID_SH"
+chmod +x "$DEAD_PID_SH"
+"$BASH_BIN" "$DEAD_PID_SH" &
+DEAD_PID=$!
+wait "$DEAD_PID" 2>/dev/null
 printf '%s\n' "$DEAD_PID" >"$(watch_pidfile 'octocat/watch-stale')"
 run_watch 1 'baseline fetch failed' \
   'gh-watch: stale pidfile (dead pid) is reclaimed, launch proceeds' \
@@ -254,7 +267,9 @@ wassert 'gh-watch: pidfile is removed on exit' \
   test ! -e "$(watch_pidfile 'octocat/watch-stale')"
 
 # Recycled pid: the file names a LIVE process that is not a gh-watch -> stale.
-sleep 300 & IMPOSTOR=$!; disown "$IMPOSTOR" 2>/dev/null || true
+sleep 300 &
+IMPOSTOR=$!
+disown "$IMPOSTOR" 2>/dev/null || true
 printf '%s\n' "$IMPOSTOR" >"$(watch_pidfile 'octocat/watch-impostor')"
 run_watch 1 'baseline fetch failed' \
   'gh-watch: live pid that is not a gh-watch is treated as stale' \
@@ -306,7 +321,8 @@ wassert 'gh-watch: directory-shaped pidfile reports only its own message on stde
   test "$DIRPID_OUT" = "could not take the watcher pidfile $(watch_pidfile 'octocat/watch-dirpid') for octocat/watch-dirpid"
 
 # --takeover replaces an incumbent that is not the caller's own watcher.
-start_live 'octocat/watch-take'; LIVE_TAKE="$REPLY"
+start_live 'octocat/watch-take'
+LIVE_TAKE="$REPLY"
 run_watch_in "$GH_WATCH_STATE_DIR" 1 'taking over from watcher pid' \
   'gh-watch: --takeover terminates the incumbent and takes the pidfile' \
   '' --takeover 'octocat/watch-take'
@@ -314,7 +330,8 @@ wassert 'gh-watch: --takeover left no incumbent running' \
   bash -c '! kill -0 '"$LIVE_TAKE"' 2>/dev/null'
 
 # SIGTERM must release the pidfile at once, not after the running `sleep 30`.
-start_live 'octocat/watch-term'; LIVE_TERM="$REPLY"
+start_live 'octocat/watch-term'
+LIVE_TERM="$REPLY"
 kill -TERM "$LIVE_TERM" 2>/dev/null
 for i in $(seq 1 20); do
   [ -e "$(watch_pidfile 'octocat/watch-term')" ] || break
@@ -332,13 +349,18 @@ printf '%s\n' "$DEAD_PID" >"$(watch_pidfile "$RACE_REPO")"
 RACE_PIDS=()
 for i in 1 2 3 4 5; do
   PATH="$STUB_BIN:$PATH" GH_STUB_OUT='[{"n":1}]' "$BASH_BIN" "$WATCH_SCRIPT" "$RACE_REPO" >/dev/null 2>&1 &
-  RACE_PIDS+=("$!"); LIVE_WATCHERS+=("$!")
+  RACE_PIDS+=("$!")
+  LIVE_WATCHERS+=("$!")
   disown "$!" 2>/dev/null || true
 done
 sleep 4
-RACE_ALIVE=0; RACE_WINNER=""
+RACE_ALIVE=0
+RACE_WINNER=""
 for p in "${RACE_PIDS[@]}"; do
-  if kill -0 "$p" 2>/dev/null; then RACE_ALIVE=$((RACE_ALIVE + 1)); RACE_WINNER="$p"; fi
+  if kill -0 "$p" 2>/dev/null; then
+    RACE_ALIVE=$((RACE_ALIVE + 1))
+    RACE_WINNER="$p"
+  fi
 done
 wassert "gh-watch: 5 concurrent launches on a stale pidfile leave exactly 1 watcher (saw $RACE_ALIVE)" \
   test "$RACE_ALIVE" -eq 1
@@ -363,8 +385,10 @@ INST_TMP="$(mktemp -d)"
 trap 'reap_live_watchers; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/null; rm -rf "$WATCHER_TMP" "$GH_TMP" "$INST_TMP"' EXIT
 
 # claude style on a fresh HOME
-IH1="$INST_TMP/h1"; mkdir -p "$IH1"
-OUT1="$(ORCA_STYLE=claude HOME="$IH1" sh "$INSTALL_SH" </dev/null 2>&1)"; RC1=$?
+IH1="$INST_TMP/h1"
+mkdir -p "$IH1"
+OUT1="$(ORCA_STYLE=claude HOME="$IH1" sh "$INSTALL_SH" </dev/null 2>&1)"
+RC1=$?
 wassert 'install: claude style exits 0' test "$RC1" -eq 0
 wassert 'install: agent symlink points into the repo' \
   test "$(readlink "$IH1/.claude/agents/orca.md")" = "$REPO_ROOT/agents/orca.md"
@@ -384,7 +408,8 @@ printf '%s' "$OUT1" | grep -q 'replaced files' && FRESH_REPLACED=1 || FRESH_REPL
 wassert 'install: fresh install prints no replaced-files line' test "$FRESH_REPLACED" = 0
 
 # rerun is a no-op
-OUT2="$(ORCA_STYLE=claude HOME="$IH1" sh "$INSTALL_SH" </dev/null 2>&1)"; RC2=$?
+OUT2="$(ORCA_STYLE=claude HOME="$IH1" sh "$INSTALL_SH" </dev/null 2>&1)"
+RC2=$?
 wassert 'install: rerun exits 0' test "$RC2" -eq 0
 printf '%s' "$OUT2" | grep -qE 'installed:|backup:' && RERUN_CHANGED=1 || RERUN_CHANGED=0
 wassert 'install: rerun changes nothing (idempotent)' test "$RERUN_CHANGED" = 0
@@ -392,8 +417,10 @@ wassert 'install: rerun leaves exactly one SessionStart entry' \
   test "$(jq '.hooks.SessionStart | length' "$IH1/.claude/settings.json")" = 1
 
 # agents style
-IH2="$INST_TMP/h2"; mkdir -p "$IH2"
-ORCA_STYLE=agents HOME="$IH2" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC3=$?
+IH2="$INST_TMP/h2"
+mkdir -p "$IH2"
+ORCA_STYLE=agents HOME="$IH2" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+RC3=$?
 wassert 'install: agents style exits 0' test "$RC3" -eq 0
 wassert 'install: agents style installs watcher + playbook' \
   bash -c "test -e '$IH2/.local/bin/gh-watch' && test -e '$IH2/.config/orca/AGENTS.md'"
@@ -404,18 +431,24 @@ wassert 'install: agents style creates no ~/.claude' test ! -d "$IH2/.claude"
 # only a notice, and the install then edited its settings.json (#16): it is
 # now the same refusal, and the directory stays empty. setsid drops the
 # controlling terminal, so /dev/tty cannot be opened, as in CI.
-IH3="$INST_TMP/h3"; mkdir -p "$IH3"
-IH24="$INST_TMP/h24"; mkdir -p "$IH24/.claude"
-IH25="$INST_TMP/h25"; mkdir -p "$IH25"
-IH29="$INST_TMP/h29"; mkdir -p "$IH29"
+IH3="$INST_TMP/h3"
+mkdir -p "$IH3"
+IH24="$INST_TMP/h24"
+mkdir -p "$IH24/.claude"
+IH25="$INST_TMP/h25"
+mkdir -p "$IH25"
+IH29="$INST_TMP/h29"
+mkdir -p "$IH29"
 NOTTY_MSG='no tty and ORCA_STYLE unset; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents'
 if command -v setsid >/dev/null 2>&1; then
-  OUT4="$(HOME="$IH3" setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"; RC4=$?
+  OUT4="$(HOME="$IH3" setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"
+  RC4=$?
   wassert 'install: no tty + no ORCA_STYLE exits 2' test "$RC4" -eq 2
   printf '%s' "$OUT4" | grep -qF "$NOTTY_MSG" && NOTTY_SAID=1 || NOTTY_SAID=0
   wassert 'install: no tty + no ORCA_STYLE says how to re-run' test "$NOTTY_SAID" = 1
   wassert 'install: no tty + no ORCA_STYLE installs nothing' test ! -d "$IH3/.claude"
-  OUT4B="$(HOME="$IH24" setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"; RC4B=$?
+  OUT4B="$(HOME="$IH24" setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"
+  RC4B=$?
   wassert 'install: no tty + no ORCA_STYLE + an existing ~/.claude exits 2, not inferred' \
     test "$RC4B" -eq 2
   printf '%s' "$OUT4B" | grep -qF "$NOTTY_MSG" && NOTTY_SAID_B=1 || NOTTY_SAID_B=0
@@ -424,15 +457,17 @@ if command -v setsid >/dev/null 2>&1; then
   wassert 'install: no tty + no ORCA_STYLE + an existing ~/.claude leaves it empty' \
     test -z "$(ls -A "$IH24/.claude")"
   # with the style stated there is nothing to ask, so no tty is no obstacle
-  HOME="$IH25" ORCA_STYLE=claude setsid -w sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC4C=$?
+  HOME="$IH25" ORCA_STYLE=claude setsid -w sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+  RC4C=$?
   wassert 'install: no tty + ORCA_STYLE=claude exits 0' test "$RC4C" -eq 0
   wassert 'install: no tty + ORCA_STYLE=claude installs and wires the hook' \
     test "$(jq '.hooks.SessionStart | length' "$IH25/.claude/settings.json")" = 1
   # a value that is set but not a style - a typo in CI - is named, not called unset
-  OUT4D="$(HOME="$IH29" ORCA_STYLE=cluade setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"; RC4D=$?
+  OUT4D="$(HOME="$IH29" ORCA_STYLE=cluade setsid -w sh "$INSTALL_SH" </dev/null 2>&1)"
+  RC4D=$?
   wassert 'install: no tty + an invalid ORCA_STYLE exits 2' test "$RC4D" -eq 2
-  printf '%s' "$OUT4D" | grep -qF 'no tty and ORCA_STYLE=cluade is not claude or agents; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents' \
-    && NOTTY_NAMED=1 || NOTTY_NAMED=0
+  printf '%s' "$OUT4D" | grep -qF 'no tty and ORCA_STYLE=cluade is not claude or agents; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents' &&
+    NOTTY_NAMED=1 || NOTTY_NAMED=0
   wassert 'install: no tty + an invalid ORCA_STYLE names the value' test "$NOTTY_NAMED" = 1
   wassert 'install: no tty + an invalid ORCA_STYLE installs nothing' test ! -d "$IH29/.claude"
 else
@@ -440,9 +475,11 @@ else
 fi
 
 # copy mode replaces (and backs up) a pre-existing file with a regular file
-IH4="$INST_TMP/h4"; mkdir -p "$IH4/.claude/agents"
-printf 'old\n' > "$IH4/.claude/agents/orca.md"
-OUT5="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null 2>&1)"; RC5=$?
+IH4="$INST_TMP/h4"
+mkdir -p "$IH4/.claude/agents"
+printf 'old\n' >"$IH4/.claude/agents/orca.md"
+OUT5="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null 2>&1)"
+RC5=$?
 wassert 'install: copy mode exits 0' test "$RC5" -eq 0
 wassert 'install: copy mode installs a regular file, not a link' \
   bash -c "test -f '$IH4/.claude/agents/orca.md' && test ! -L '$IH4/.claude/agents/orca.md'"
@@ -452,21 +489,26 @@ printf '%s' "$OUT5" | grep -qF "replaced files moved to $IH4/.orca-backups/" && 
 wassert 'install: an install over an existing file names the backup dir' test "$BACKUP_SAID" = 1
 
 # copy-mode rerun is also a no-op (identical files short-circuit before backup)
-OUT6="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null 2>&1)"; RC6=$?
+OUT6="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH4" sh "$INSTALL_SH" </dev/null 2>&1)"
+RC6=$?
 wassert 'install: copy-mode rerun exits 0' test "$RC6" -eq 0
 printf '%s' "$OUT6" | grep -qE 'installed:|backup:' && COPY_RERUN_CHANGED=1 || COPY_RERUN_CHANGED=0
 wassert 'install: copy-mode rerun changes nothing (idempotent)' test "$COPY_RERUN_CHANGED" = 0
 
 # agents-style rerun is a no-op too
-OUT7="$(ORCA_STYLE=agents HOME="$IH2" sh "$INSTALL_SH" </dev/null 2>&1)"; RC7=$?
+OUT7="$(ORCA_STYLE=agents HOME="$IH2" sh "$INSTALL_SH" </dev/null 2>&1)"
+RC7=$?
 wassert 'install: agents-style rerun exits 0' test "$RC7" -eq 0
 printf '%s' "$OUT7" | grep -qE 'installed:|backup:' && AGENTS_RERUN_CHANGED=1 || AGENTS_RERUN_CHANGED=0
 wassert 'install: agents-style rerun changes nothing (idempotent)' test "$AGENTS_RERUN_CHANGED" = 0
 
 # custom CLAUDE_HOME: files land there and the wired hook command names it,
 # never the ~/.claude default (which would point at nothing)
-IH5="$INST_TMP/h5"; CH5="$INST_TMP/ch5"; mkdir -p "$IH5"
-ORCA_STYLE=claude HOME="$IH5" CLAUDE_HOME="$CH5" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RC8=$?
+IH5="$INST_TMP/h5"
+CH5="$INST_TMP/ch5"
+mkdir -p "$IH5"
+ORCA_STYLE=claude HOME="$IH5" CLAUDE_HOME="$CH5" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+RC8=$?
 wassert 'install: custom CLAUDE_HOME exits 0' test "$RC8" -eq 0
 wassert 'install: custom CLAUDE_HOME receives the files' \
   test -e "$CH5/hooks/orca-start-watcher.sh"
@@ -480,11 +522,13 @@ wassert 'install: wired hook command names the custom CLAUDE_HOME' \
 # second copy on every run (#15). A recognised entry leaves the file untouched
 # - a rewrite would have backed it up and reformatted it - so cmp is asserted
 # beside the entry count.
-IH19="$INST_TMP/h19"; mkdir -p "$IH19/.claude"
+IH19="$INST_TMP/h19"
+mkdir -p "$IH19/.claude"
 printf '%s\n' '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh"}]}]}}' \
   >"$IH19/.claude/settings.json"
 cp "$IH19/.claude/settings.json" "$INST_TMP/h19-settings.before"
-OUTD1="$(ORCA_STYLE=claude HOME="$IH19" sh "$INSTALL_SH" </dev/null 2>&1)"; RCD1=$?
+OUTD1="$(ORCA_STYLE=claude HOME="$IH19" sh "$INSTALL_SH" </dev/null 2>&1)"
+RCD1=$?
 wassert 'install: a hand-wired entry with a matcher key exits 0' test "$RCD1" -eq 0
 wassert 'install: a hand-wired entry with a matcher key is not duplicated' \
   test "$(jq '.hooks.SessionStart | length' "$IH19/.claude/settings.json")" = 1
@@ -497,11 +541,13 @@ wassert 'install: a rerun over a hand-wired entry keeps exactly one entry' \
   test "$(jq '.hooks.SessionStart | length' "$IH19/.claude/settings.json")" = 1
 
 # the same, with the extra key inside hooks[] rather than beside it
-IH20="$INST_TMP/h20"; mkdir -p "$IH20/.claude"
+IH20="$INST_TMP/h20"
+mkdir -p "$IH20/.claude"
 printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh","timeout":10}]}]}}' \
   >"$IH20/.claude/settings.json"
 cp "$IH20/.claude/settings.json" "$INST_TMP/h20-settings.before"
-ORCA_STYLE=claude HOME="$IH20" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD2=$?
+ORCA_STYLE=claude HOME="$IH20" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+RCD2=$?
 wassert 'install: a hand-wired entry with extra keys inside hooks[] exits 0' test "$RCD2" -eq 0
 wassert 'install: a hand-wired entry with extra keys inside hooks[] is not duplicated' \
   test "$(jq '.hooks.SessionStart | length' "$IH20/.claude/settings.json")" = 1
@@ -511,7 +557,8 @@ wassert 'install: a hand-wired entry with extra keys inside hooks[] leaves setti
 # an unrelated entry - a matcher, extra keys, a command of its own - is never
 # taken for the hook: orca is wired beside it, it survives with every key and
 # value intact, and a rerun adds nothing.
-IH21="$INST_TMP/h21"; mkdir -p "$IH21/.claude"
+IH21="$INST_TMP/h21"
+mkdir -p "$IH21/.claude"
 printf '%s\n' '{"hooks":{"SessionStart":[{"matcher":"startup","hooks":[{"type":"command","command":"~/.claude/hooks/mine.sh","timeout":5}]}]}}' \
   >"$IH21/.claude/settings.json"
 PRE21="$(jq -Sc '.hooks.SessionStart[0]' "$IH21/.claude/settings.json")"
@@ -527,7 +574,8 @@ wassert 'install: a rerun beside the unrelated entry keeps exactly two entries' 
 # ...and so is an entry whose command merely CONTAINS the hook path: wired
 # means equal to it, never a substring of it, or a `.bak` beside the hook
 # would pass for the hook and orca would be left unwired (#38).
-IH26="$INST_TMP/h26"; mkdir -p "$IH26/.claude"
+IH26="$INST_TMP/h26"
+mkdir -p "$IH26/.claude"
 printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh.bak"}]}]}}' \
   >"$IH26/.claude/settings.json"
 ORCA_STYLE=claude HOME="$IH26" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
@@ -538,17 +586,21 @@ wassert 'install: the containing entry and the orca entry both stand, each with 
 
 # the expanded spelling is recognised too: the absolute path a custom
 # CLAUDE_HOME writes, and the default path spelled out in full by hand.
-IH22="$INST_TMP/h22"; CH22="$INST_TMP/ch22"; mkdir -p "$IH22" "$CH22"
+IH22="$INST_TMP/h22"
+CH22="$INST_TMP/ch22"
+mkdir -p "$IH22" "$CH22"
 printf '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"%s/hooks/orca-start-watcher.sh"}]}]}}\n' "$CH22" \
   >"$CH22/settings.json"
 cp "$CH22/settings.json" "$INST_TMP/h22-settings.before"
-ORCA_STYLE=claude HOME="$IH22" CLAUDE_HOME="$CH22" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD4=$?
+ORCA_STYLE=claude HOME="$IH22" CLAUDE_HOME="$CH22" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+RCD4=$?
 wassert 'install: a hand-wired entry naming a custom CLAUDE_HOME exits 0' test "$RCD4" -eq 0
 wassert 'install: a hand-wired entry naming a custom CLAUDE_HOME is not duplicated' \
   test "$(jq '.hooks.SessionStart | length' "$CH22/settings.json")" = 1
 wassert 'install: a hand-wired entry naming a custom CLAUDE_HOME leaves settings.json untouched' \
   cmp -s "$INST_TMP/h22-settings.before" "$CH22/settings.json"
-IH23="$INST_TMP/h23"; mkdir -p "$IH23/.claude"
+IH23="$INST_TMP/h23"
+mkdir -p "$IH23/.claude"
 printf '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"%s/.claude/hooks/orca-start-watcher.sh"}]}]}}\n' "$IH23" \
   >"$IH23/.claude/settings.json"
 ORCA_STYLE=claude HOME="$IH23" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
@@ -558,18 +610,22 @@ wassert 'install: a hand-wired entry spelling the default path out in full is no
 # a trailing slash on CLAUDE_HOME names the same home: `/x/` used to build the
 # hook identity as `/x//hooks/...`, which matched no hand-wired `/x/hooks/...`,
 # so install appended a duplicate on every run (#38).
-IH27="$INST_TMP/h27"; CH27="$INST_TMP/ch27"; mkdir -p "$IH27" "$CH27"
+IH27="$INST_TMP/h27"
+CH27="$INST_TMP/ch27"
+mkdir -p "$IH27" "$CH27"
 printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"%s/hooks/orca-start-watcher.sh"}]}]}}\n' "$CH27" \
   >"$CH27/settings.json"
 cp "$CH27/settings.json" "$INST_TMP/h27-settings.before"
-ORCA_STYLE=claude HOME="$IH27" CLAUDE_HOME="$CH27/" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD5=$?
+ORCA_STYLE=claude HOME="$IH27" CLAUDE_HOME="$CH27/" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+RCD5=$?
 wassert 'install: CLAUDE_HOME with a trailing slash exits 0' test "$RCD5" -eq 0
 wassert 'install: CLAUDE_HOME with a trailing slash does not duplicate a hand-wired plain-path entry' \
   test "$(jq '.hooks.SessionStart | length' "$CH27/settings.json")" = 1
 wassert 'install: CLAUDE_HOME with a trailing slash leaves the hand-wired settings.json untouched' \
   cmp -s "$INST_TMP/h27-settings.before" "$CH27/settings.json"
 # every trailing slash, not just one: `<dir>//` is the same home too
-ORCA_STYLE=claude HOME="$IH27" CLAUDE_HOME="$CH27//" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1; RCD6=$?
+ORCA_STYLE=claude HOME="$IH27" CLAUDE_HOME="$CH27//" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+RCD6=$?
 wassert 'install: CLAUDE_HOME with two trailing slashes exits 0' test "$RCD6" -eq 0
 wassert 'install: CLAUDE_HOME with two trailing slashes does not duplicate a hand-wired plain-path entry' \
   test "$(jq '.hooks.SessionStart | length' "$CH27/settings.json")" = 1
@@ -591,7 +647,8 @@ if command -v git >/dev/null 2>&1; then
   cp "$REPO_ROOT/agents/orca.md" "$ORIGIN/agents/orca.md"
   cp "$HOOKS_DIR/orca-start-watcher.sh" "$ORIGIN/hooks/orca-start-watcher.sh"
   cp "$WATCH_SCRIPT" "$ORIGIN/scripts/gh-watch.sh"
-  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+  (
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
       GIT_AUTHOR_NAME=orca-test GIT_AUTHOR_EMAIL=orca-test@example.invalid \
       GIT_COMMITTER_NAME=orca-test GIT_COMMITTER_EMAIL=orca-test@example.invalid
     git -C "$ORIGIN" init -q -b main
@@ -600,16 +657,19 @@ if command -v git >/dev/null 2>&1; then
     git -C "$ORIGIN" tag v0.1.0
     git -C "$ORIGIN" commit -q --allow-empty -m 'release v0.2.0'
     git -C "$ORIGIN" tag v0.2.0
-    git -C "$ORIGIN" commit -q --allow-empty -m 'unreleased' )
+    git -C "$ORIGIN" commit -q --allow-empty -m 'unreleased'
+  )
 fi
 
 # piped bootstrap: stdin-fed script ($0 is the shell) must clone to ORCA_REPO
 # and re-exec from the clone - never trust the cwd. file:// keeps it offline.
 if command -v git >/dev/null 2>&1; then
-  BOOT="$INST_TMP/boot"; mkdir -p "$BOOT/home"
-  ( cd "$INST_TMP" && \
+  BOOT="$INST_TMP/boot"
+  mkdir -p "$BOOT/home"
+  (cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$BOOT/clone" ORCA_STYLE=claude \
-    HOME="$BOOT/home" sh <"$INSTALL_SH" ) >/dev/null 2>&1; RC9=$?
+      HOME="$BOOT/home" sh <"$INSTALL_SH") >/dev/null 2>&1
+  RC9=$?
   wassert 'install: piped bootstrap exits 0' test "$RC9" -eq 0
   wassert 'install: piped bootstrap cloned to ORCA_REPO' \
     test -f "$BOOT/clone/agents/orca.md"
@@ -631,10 +691,12 @@ fi
 # - cloning into a directory literally named `~` inside the user's home. Only
 # the piped path reaches that code, so these drive it the same way as above.
 if command -v git >/dev/null 2>&1; then
-  TH1="$INST_TMP/tilde-slash"; mkdir -p "$TH1/home"
-  OUTT1="$( cd "$INST_TMP" && \
+  TH1="$INST_TMP/tilde-slash"
+  mkdir -p "$TH1/home"
+  OUTT1="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO='~/clone' ORCA_STYLE=claude \
-    HOME="$TH1/home" sh <"$INSTALL_SH" 2>&1 )"; RCT1=$?
+      HOME="$TH1/home" sh <"$INSTALL_SH" 2>&1)"
+  RCT1=$?
   wassert 'install: ORCA_REPO="~/x" exits 0' test "$RCT1" -eq 0
   wassert 'install: ORCA_REPO="~/x" cloned to $HOME/x' \
     test -f "$TH1/home/clone/agents/orca.md"
@@ -642,23 +704,25 @@ if command -v git >/dev/null 2>&1; then
     test ! -e "$TH1/home/~"
   # -F: the expected line interpolates a mktemp path (`tmp.XXXXXXXXXX`), so
   # without it the `.` is a live BRE metacharacter, not a literal.
-  printf '%s' "$OUTT1" | grep -qxF "Installing orca (claude style) from $TH1/home/clone" \
-    && T1_RESOLVED=1 || T1_RESOLVED=0
+  printf '%s' "$OUTT1" | grep -qxF "Installing orca (claude style) from $TH1/home/clone" &&
+    T1_RESOLVED=1 || T1_RESOLVED=0
   wassert 'install: ORCA_REPO="~/x" resolved to $HOME/x, tilde expanded' \
     test "$T1_RESOLVED" = 1
 
   # the bare `~` form resolves to $HOME itself
-  TH2="$INST_TMP/tilde-bare"; mkdir -p "$TH2/home"
-  OUTT2="$( cd "$INST_TMP" && \
+  TH2="$INST_TMP/tilde-bare"
+  mkdir -p "$TH2/home"
+  OUTT2="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO='~' ORCA_STYLE=claude \
-    HOME="$TH2/home" sh <"$INSTALL_SH" 2>&1 )"; RCT2=$?
+      HOME="$TH2/home" sh <"$INSTALL_SH" 2>&1)"
+  RCT2=$?
   wassert 'install: ORCA_REPO="~" exits 0' test "$RCT2" -eq 0
   wassert 'install: ORCA_REPO="~" cloned into $HOME itself' \
     test -f "$TH2/home/agents/orca.md"
   wassert 'install: ORCA_REPO="~" left no literal ~ segment on disk' \
     test ! -e "$TH2/home/~"
-  printf '%s' "$OUTT2" | grep -qxF "Installing orca (claude style) from $TH2/home" \
-    && T2_RESOLVED=1 || T2_RESOLVED=0
+  printf '%s' "$OUTT2" | grep -qxF "Installing orca (claude style) from $TH2/home" &&
+    T2_RESOLVED=1 || T2_RESOLVED=0
   wassert 'install: ORCA_REPO="~" resolved to $HOME, tilde expanded' \
     test "$T2_RESOLVED" = 1
 else
@@ -671,10 +735,12 @@ fi
 # sits on, which is what the version line reads back) and then the line.
 if command -v git >/dev/null 2>&1; then
   # default: the pinned tag, present locally so `git describe` can name it
-  PIN1="$INST_TMP/pin-default"; mkdir -p "$PIN1/home"
-  OUTV1="$( cd "$INST_TMP" && \
+  PIN1="$INST_TMP/pin-default"
+  mkdir -p "$PIN1/home"
+  OUTV1="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN1/clone" ORCA_STYLE=claude \
-    HOME="$PIN1/home" sh <"$INSTALL_SH" 2>&1 )"; RCV1=$?
+      HOME="$PIN1/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV1=$?
   wassert 'install: pinned default exits 0' test "$RCV1" -eq 0
   wassert 'install: pinned default checks out v0.1.0, not the head of main' \
     test "$(git -C "$PIN1/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
@@ -682,10 +748,12 @@ if command -v git >/dev/null 2>&1; then
   wassert 'install: pinned default reports the version it installed' test "$V1_SAID" = 1
 
   # ORCA_REF override: another tag ...
-  PIN2="$INST_TMP/pin-tag"; mkdir -p "$PIN2/home"
-  OUTV2="$( cd "$INST_TMP" && \
+  PIN2="$INST_TMP/pin-tag"
+  mkdir -p "$PIN2/home"
+  OUTV2="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN2/clone" ORCA_REF=v0.2.0 ORCA_STYLE=claude \
-    HOME="$PIN2/home" sh <"$INSTALL_SH" 2>&1 )"; RCV2=$?
+      HOME="$PIN2/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV2=$?
   wassert 'install: ORCA_REF=<tag> exits 0' test "$RCV2" -eq 0
   wassert 'install: ORCA_REF=<tag> checks out that tag' \
     test "$(git -C "$PIN2/clone" describe --tags --exact-match 2>/dev/null)" = v0.2.0
@@ -694,22 +762,25 @@ if command -v git >/dev/null 2>&1; then
 
   # ... and a branch name: ORCA_REF=main is the documented development
   # setting. Its head carries no tag, so the version line names the commit.
-  PIN3="$INST_TMP/pin-main"; mkdir -p "$PIN3/home"
-  OUTV3="$( cd "$INST_TMP" && \
+  PIN3="$INST_TMP/pin-main"
+  mkdir -p "$PIN3/home"
+  OUTV3="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=main ORCA_STYLE=claude \
-    HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1 )"; RCV3=$?
+      HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV3=$?
   wassert 'install: ORCA_REF=main exits 0' test "$RCV3" -eq 0
   wassert 'install: ORCA_REF=main checks out the head of main' \
     test "$(git -C "$PIN3/clone" rev-parse HEAD 2>/dev/null)" = "$(git -C "$ORIGIN" rev-parse main)"
-  printf '%s' "$OUTV3" | grep -qxF "installed orca $(git -C "$ORIGIN" rev-parse --short main)" \
-    && V3_SAID=1 || V3_SAID=0
+  printf '%s' "$OUTV3" | grep -qxF "installed orca $(git -C "$ORIGIN" rev-parse --short main)" &&
+    V3_SAID=1 || V3_SAID=0
   wassert 'install: ORCA_REF=main reports the commit, having no tag to name' test "$V3_SAID" = 1
 
   # re-run on an existing checkout: moved to the pinned tag from wherever it
   # was left - here a branch, which is what the previous installer left.
-  OUTV4="$( cd "$INST_TMP" && \
+  OUTV4="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_STYLE=claude \
-    HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1 )"; RCV4=$?
+      HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV4=$?
   wassert 'install: re-run on an existing checkout exits 0' test "$RCV4" -eq 0
   wassert 'install: re-run moves the existing checkout to the pinned tag' \
     test "$(git -C "$PIN3/clone" describe --tags --exact-match 2>/dev/null)" = v0.1.0
@@ -718,10 +789,12 @@ if command -v git >/dev/null 2>&1; then
 
   # unknown ref: exits non-zero before anything is installed - on a machine
   # with no checkout, and on one whose checkout then stays where it was.
-  PIN5="$INST_TMP/pin-unknown"; mkdir -p "$PIN5/home"
-  OUTV5="$( cd "$INST_TMP" && \
+  PIN5="$INST_TMP/pin-unknown"
+  mkdir -p "$PIN5/home"
+  OUTV5="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN5/clone" ORCA_REF=v9.9.9 ORCA_STYLE=claude \
-    HOME="$PIN5/home" sh <"$INSTALL_SH" 2>&1 )"; RCV5=$?
+      HOME="$PIN5/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV5=$?
   wassert 'install: unknown ORCA_REF exits non-zero' test "$RCV5" -ne 0
   wassert 'install: unknown ORCA_REF installs nothing' test ! -d "$PIN5/home/.claude"
   wassert 'install: unknown ORCA_REF leaves no checkout behind' test ! -e "$PIN5/clone"
@@ -730,9 +803,10 @@ if command -v git >/dev/null 2>&1; then
   printf '%s' "$OUTV5" | grep -qF 'could not clone orca v9.9.9' && V5_SAID=1 || V5_SAID=0
   wassert 'install: unknown ORCA_REF fails through the clone guard, naming the ref' test "$V5_SAID" = 1
 
-  OUTV6="$( cd "$INST_TMP" && \
+  OUTV6="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=v9.9.9 ORCA_STYLE=claude \
-    HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1 )"; RCV6=$?
+      HOME="$PIN3/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV6=$?
   wassert 'install: unknown ORCA_REF on an existing checkout exits non-zero' test "$RCV6" -ne 0
   # the guard's own line: with it deleted, a swallowed fetch failure would
   # reach `checkout FETCH_HEAD`, and the exit status alone would not tell.
@@ -745,10 +819,12 @@ if command -v git >/dev/null 2>&1; then
   # a ref that leads with `-`: it follows `--`, so git reads it as a ref and
   # never as an option. It fails through the same guard, with no `unknown
   # switch` from git, and installs nothing into a fresh HOME.
-  PIN7="$INST_TMP/pin-dash"; mkdir -p "$PIN7/home"
-  OUTV7="$( cd "$INST_TMP" && \
+  PIN7="$INST_TMP/pin-dash"
+  mkdir -p "$PIN7/home"
+  OUTV7="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN3/clone" ORCA_REF=-x ORCA_STYLE=claude \
-    HOME="$PIN7/home" sh <"$INSTALL_SH" 2>&1 )"; RCV7=$?
+      HOME="$PIN7/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV7=$?
   wassert 'install: ORCA_REF=-x exits non-zero' test "$RCV7" -ne 0
   printf '%s' "$OUTV7" | grep -qF 'could not fetch -x' && V7_SAID=1 || V7_SAID=0
   wassert 'install: ORCA_REF=-x fails through the fetch guard' test "$V7_SAID" = 1
@@ -760,13 +836,17 @@ if command -v git >/dev/null 2>&1; then
   # remote the checkout carries - here one with no tags at all - and the
   # checkout's own remote is left as it was.
   TAGLESS="$INST_TMP/tagless"
-  PIN8="$INST_TMP/pin-url"; mkdir -p "$PIN8/home"
-  ( export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+  PIN8="$INST_TMP/pin-url"
+  mkdir -p "$PIN8/home"
+  (
+    export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
     git clone -q --no-tags -- "file://$ORIGIN" "$TAGLESS"
-    git clone -q --depth 1 -- "file://$TAGLESS" "$PIN8/clone" )
-  OUTV8="$( cd "$INST_TMP" && \
+    git clone -q --depth 1 -- "file://$TAGLESS" "$PIN8/clone"
+  )
+  OUTV8="$(cd "$INST_TMP" &&
     ORCA_URL="file://$ORIGIN" ORCA_REPO="$PIN8/clone" ORCA_STYLE=claude \
-    HOME="$PIN8/home" sh <"$INSTALL_SH" 2>&1 )"; RCV8=$?
+      HOME="$PIN8/home" sh <"$INSTALL_SH" 2>&1)"
+  RCV8=$?
   wassert 'install: re-run against ORCA_URL exits 0 though the checkout remote lacks the tag' \
     test "$RCV8" -eq 0
   wassert 'install: re-run against ORCA_URL ends at the pinned tag' \
@@ -780,10 +860,13 @@ if command -v git >/dev/null 2>&1; then
   # inside some other repository `git describe` would walk up and report THAT
   # repository's version. Gated on the checkout's own .git, so it prints none.
   # The tagged origin above stands in for the enclosing repository.
-  TARBALL="$ORIGIN/tarball"; mkdir -p "$TARBALL"
+  TARBALL="$ORIGIN/tarball"
+  mkdir -p "$TARBALL"
   cp -R "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts" "$ORIGIN/install.sh" "$TARBALL/"
-  PIN9="$INST_TMP/tarball-home"; mkdir -p "$PIN9"
-  OUTV9="$(ORCA_STYLE=claude HOME="$PIN9" sh "$TARBALL/install.sh" </dev/null 2>&1)"; RCV9=$?
+  PIN9="$INST_TMP/tarball-home"
+  mkdir -p "$PIN9"
+  OUTV9="$(ORCA_STYLE=claude HOME="$PIN9" sh "$TARBALL/install.sh" </dev/null 2>&1)"
+  RCV9=$?
   wassert 'install: a tarball inside another repository exits 0' test "$RCV9" -eq 0
   wassert 'install: a tarball inside another repository still installs' \
     test -L "$PIN9/.claude/agents/orca.md"
@@ -805,9 +888,11 @@ fi
 # user-owned file asserts the file is still there afterwards.
 
 # claude style: install, then uninstall, leaves nothing of orca's
-IH6="$INST_TMP/h6"; mkdir -p "$IH6"
+IH6="$INST_TMP/h6"
+mkdir -p "$IH6"
 ORCA_STYLE=claude HOME="$IH6" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-OUTU1="$(HOME="$IH6" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU1=$?
+OUTU1="$(HOME="$IH6" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+RCU1=$?
 wassert 'uninstall: claude style exits 0' test "$RCU1" -eq 0
 # -e is false for a DANGLING symlink, so -L is asserted too: a link left
 # pointing at a removed checkout would otherwise read as "gone".
@@ -821,7 +906,8 @@ wassert 'uninstall: settings.json keeps no trace of orca' \
   bash -c "! grep -q orca '$IH6/.claude/settings.json'"
 
 # running it twice must be a clean no-op, not an error
-OUTU2="$(HOME="$IH6" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU2=$?
+OUTU2="$(HOME="$IH6" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+RCU2=$?
 wassert 'uninstall: rerun exits 0' test "$RCU2" -eq 0
 printf '%s' "$OUTU2" | grep -qE 'removed:|left alone:' && UN_RERUN_CHANGED=1 || UN_RERUN_CHANGED=0
 wassert 'uninstall: rerun touches nothing (idempotent)' test "$UN_RERUN_CHANGED" = 0
@@ -829,7 +915,8 @@ wassert 'uninstall: rerun touches nothing (idempotent)' test "$UN_RERUN_CHANGED"
 # a settings.json the user already had: orca's entry goes, everything else -
 # other SessionStart entries, other hook types, unrelated top-level keys -
 # survives with its values intact.
-IH7="$INST_TMP/h7"; mkdir -p "$IH7/.claude"
+IH7="$INST_TMP/h7"
+mkdir -p "$IH7/.claude"
 cat >"$IH7/.claude/settings.json" <<'JSON'
 {
   "model": "opus",
@@ -857,19 +944,21 @@ wassert 'uninstall: no orca entry is left in a shared settings.json' \
 
 # user-owned content sitting at install paths: an edited copy and a symlink
 # pointing somewhere that is not an orca checkout. Neither is ours to delete.
-IH8="$INST_TMP/h8"; mkdir -p "$IH8"
+IH8="$INST_TMP/h8"
+mkdir -p "$IH8"
 ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH8" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 printf 'my own agent\n' >"$IH8/.claude/agents/orca.md"
 rm -f "$IH8/.claude/scripts/gh-watch.sh"
 ln -s /dev/null "$IH8/.claude/scripts/gh-watch.sh"
-OUTU3="$(HOME="$IH8" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU3=$?
+OUTU3="$(HOME="$IH8" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+RCU3=$?
 wassert 'uninstall: exits 0 with user-owned files at install paths' test "$RCU3" -eq 0
 wassert 'uninstall: a user-edited file at an install path is NOT removed' \
   bash -c "grep -q 'my own agent' '$IH8/.claude/agents/orca.md'"
 wassert 'uninstall: a symlink pointing outside an orca checkout is NOT removed' \
   test "$(readlink "$IH8/.claude/scripts/gh-watch.sh")" = /dev/null
-printf '%s' "$OUTU3" | grep -qF "left alone: $IH8/.claude/agents/orca.md" \
-  && UN_SAID_LEFT=1 || UN_SAID_LEFT=0
+printf '%s' "$OUTU3" | grep -qF "left alone: $IH8/.claude/agents/orca.md" &&
+  UN_SAID_LEFT=1 || UN_SAID_LEFT=0
 wassert 'uninstall: names on stdout what it left alone' test "$UN_SAID_LEFT" = 1
 # same run, same directory: a copy-mode file still byte-identical to the
 # source IS ours, and goes. Provenance is per path, not per run.
@@ -877,9 +966,11 @@ wassert 'uninstall: an untouched copy-mode file is still removed' \
   bash -c "test ! -e '$IH8/.claude/hooks/orca-start-watcher.sh'"
 
 # agents style: the watcher, the playbook, and orca's own ~/.config/orca dir
-IH9="$INST_TMP/h9"; mkdir -p "$IH9"
+IH9="$INST_TMP/h9"
+mkdir -p "$IH9"
 ORCA_STYLE=agents HOME="$IH9" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-HOME="$IH9" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU4=$?
+HOME="$IH9" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+RCU4=$?
 wassert 'uninstall: agents style exits 0' test "$RCU4" -eq 0
 wassert 'uninstall: agents style removes the watcher and the playbook' \
   bash -c "test ! -e '$IH9/.local/bin/gh-watch' && test ! -e '$IH9/.config/orca/AGENTS.md'"
@@ -889,9 +980,12 @@ wassert 'uninstall: agents style removes its own empty ~/.config/orca' \
 wassert 'uninstall: agents style leaves ~/.local/bin standing' test -d "$IH9/.local/bin"
 
 # custom CLAUDE_HOME: torn down where it was installed, not at ~/.claude
-IH10="$INST_TMP/h10"; CH10="$INST_TMP/ch10"; mkdir -p "$IH10"
+IH10="$INST_TMP/h10"
+CH10="$INST_TMP/ch10"
+mkdir -p "$IH10"
 ORCA_STYLE=claude HOME="$IH10" CLAUDE_HOME="$CH10" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-HOME="$IH10" CLAUDE_HOME="$CH10" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU5=$?
+HOME="$IH10" CLAUDE_HOME="$CH10" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+RCU5=$?
 wassert 'uninstall: custom CLAUDE_HOME exits 0' test "$RCU5" -eq 0
 wassert 'uninstall: custom CLAUDE_HOME files are removed' \
   bash -c "test ! -e '$CH10/agents/orca.md' && test ! -e '$CH10/hooks/orca-start-watcher.sh'"
@@ -901,22 +995,27 @@ wassert 'uninstall: custom CLAUDE_HOME settings.json is unwired' \
 # ...spelled with a trailing slash at uninstall time, it is still the same
 # home: the installer's own entry is found and dropped, where `/x//hooks/...`
 # used to find nothing and report no orca entry (#38).
-IH28="$INST_TMP/h28"; CH28="$INST_TMP/ch28"; mkdir -p "$IH28"
+IH28="$INST_TMP/h28"
+CH28="$INST_TMP/ch28"
+mkdir -p "$IH28"
 ORCA_STYLE=claude HOME="$IH28" CLAUDE_HOME="$CH28" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-HOME="$IH28" CLAUDE_HOME="$CH28/" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU12=$?
+HOME="$IH28" CLAUDE_HOME="$CH28/" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+RCU12=$?
 wassert 'uninstall: CLAUDE_HOME with a trailing slash exits 0' test "$RCU12" -eq 0
 wassert 'uninstall: CLAUDE_HOME with a trailing slash unwires the entry the installer wrote' \
   test "$(jq '.hooks.SessionStart // [] | length' "$CH28/settings.json")" = 0
 # every trailing slash, not just one: `<dir>//` finds the entry too
 ORCA_STYLE=claude HOME="$IH28" CLAUDE_HOME="$CH28" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-HOME="$IH28" CLAUDE_HOME="$CH28//" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1; RCU13=$?
+HOME="$IH28" CLAUDE_HOME="$CH28//" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+RCU13=$?
 wassert 'uninstall: CLAUDE_HOME with two trailing slashes exits 0' test "$RCU13" -eq 0
 wassert 'uninstall: CLAUDE_HOME with two trailing slashes unwires the entry the installer wrote' \
   test "$(jq '.hooks.SessionStart // [] | length' "$CH28/settings.json")" = 0
 
 # backups are the user's escape hatch: uninstall points at them, never
 # restores blind (which run's backup would it even pick?) and never deletes.
-IH11="$INST_TMP/h11"; mkdir -p "$IH11/.claude/agents"
+IH11="$INST_TMP/h11"
+mkdir -p "$IH11/.claude/agents"
 printf 'previous agent\n' >"$IH11/.claude/agents/orca.md"
 ORCA_STYLE=claude ORCA_MODE=copy HOME="$IH11" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 OUTU4="$(HOME="$IH11" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
@@ -933,8 +1032,10 @@ wassert 'uninstall: the backup note points at --restore' test "$UN_RESTORE_NOTE"
 # settings.json with sed/grep guesswork would be worse than not editing it.
 # The suite itself needs jq, so jq is hidden with a PATH shim holding only the
 # tools the uninstall path uses.
-IH13="$INST_TMP/h13"; mkdir -p "$IH13"
-NOJQ_BIN="$INST_TMP/nojq-bin"; mkdir -p "$NOJQ_BIN"
+IH13="$INST_TMP/h13"
+mkdir -p "$IH13"
+NOJQ_BIN="$INST_TMP/nojq-bin"
+mkdir -p "$NOJQ_BIN"
 NOJQ_OK=1
 for t in sh dirname readlink cmp rm rmdir mktemp date mkdir ln cp; do
   p="$(command -v "$t")" && ln -s "$p" "$NOJQ_BIN/$t" || NOJQ_OK=0
@@ -945,14 +1046,15 @@ if [[ "$NOJQ_OK" == 1 ]]; then
   # newlines, so a string compare cannot see a trailing-newline-only change
   # and has no business claiming "byte-for-byte".
   cp "$IH13/.claude/settings.json" "$INST_TMP/nojq-settings.before"
-  OUTU5="$(env -i PATH="$NOJQ_BIN" HOME="$IH13" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU9=$?
+  OUTU5="$(env -i PATH="$NOJQ_BIN" HOME="$IH13" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+  RCU9=$?
   wassert 'uninstall: without jq exits 0' test "$RCU9" -eq 0
   wassert 'uninstall: without jq still removes the files it owns' \
     bash -c "test ! -e '$IH13/.claude/hooks/orca-start-watcher.sh'"
   wassert 'uninstall: without jq leaves settings.json byte-for-byte identical' \
     cmp -s "$INST_TMP/nojq-settings.before" "$IH13/.claude/settings.json"
-  printf '%s' "$OUTU5" | grep -qF '{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh"}]}' \
-    && NOJQ_TOLD=1 || NOJQ_TOLD=0
+  printf '%s' "$OUTU5" | grep -qF '{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh"}]}' &&
+    NOJQ_TOLD=1 || NOJQ_TOLD=0
   wassert 'uninstall: without jq prints the exact entry to remove by hand' \
     test "$NOJQ_TOLD" = 1
 else
@@ -971,17 +1073,20 @@ fi
 # The stale checkout here carries a TRIPWIRE install.sh that cannot be
 # mistaken for a working one: if the bootstrap ever execs it again, it leaves
 # a marker and the case fails. No git and no network are involved.
-IHP="$INST_TMP/piped-un"; mkdir -p "$IHP/home"
-STALE="$IHP/stale"; mkdir -p "$STALE/agents"
+IHP="$INST_TMP/piped-un"
+mkdir -p "$IHP/home"
+STALE="$IHP/stale"
+mkdir -p "$STALE/agents"
 cp "$REPO_ROOT/agents/orca.md" "$STALE/agents/orca.md"
 printf '#!/bin/sh\ntouch "%s/EXECUTED"\nexit 0\n' "$STALE" >"$STALE/install.sh"
 chmod +x "$STALE/install.sh"
 ORCA_STYLE=claude HOME="$IHP/home" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 # ORCA_URL is deliberately bogus: if anything tries to fetch, it fails loudly
 # rather than quietly succeeding on a machine that happens to be online.
-OUTP1="$( cd "$INST_TMP" && \
+OUTP1="$(cd "$INST_TMP" &&
   ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$STALE" \
-  HOME="$IHP/home" sh -s -- --uninstall <"$INSTALL_SH" 2>&1 )"; RCP1=$?
+    HOME="$IHP/home" sh -s -- --uninstall <"$INSTALL_SH" 2>&1)"
+RCP1=$?
 wassert 'uninstall: piped uninstall exits 0' test "$RCP1" -eq 0
 wassert 'uninstall: piped uninstall never re-execs the install.sh on disk' \
   test ! -e "$STALE/EXECUTED"
@@ -996,11 +1101,13 @@ wassert 'uninstall: piped uninstall reports no install activity at all' \
 
 # ...and with no checkout anywhere it must still not fetch one: a teardown
 # that needs the network (or git) is broken by design.
-IHP2="$INST_TMP/piped-un2"; mkdir -p "$IHP2/home"
+IHP2="$INST_TMP/piped-un2"
+mkdir -p "$IHP2/home"
 ORCA_STYLE=claude HOME="$IHP2/home" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-( cd "$INST_TMP" && \
+(cd "$INST_TMP" &&
   ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$IHP2/absent" \
-  HOME="$IHP2/home" sh -s -- --uninstall <"$INSTALL_SH" >/dev/null 2>&1 ); RCP2=$?
+    HOME="$IHP2/home" sh -s -- --uninstall <"$INSTALL_SH" >/dev/null 2>&1)
+RCP2=$?
 wassert 'uninstall: piped uninstall with no checkout exits 0' test "$RCP2" -eq 0
 wassert 'uninstall: piped uninstall clones nothing' test ! -e "$IHP2/absent"
 wassert 'uninstall: piped uninstall still removes symlinks without a checkout' \
@@ -1011,18 +1118,21 @@ wassert 'uninstall: piped uninstall still removes symlinks without a checkout' \
 # resolves against the uninstaller's cwd, and the check silently degrades to
 # "am I being run from inside a checkout?" - which the documented invocation
 # always is. This case runs from $REPO_ROOT, the worst case for that bug.
-IH14="$INST_TMP/h14"; mkdir -p "$IH14/.claude/agents"
+IH14="$INST_TMP/h14"
+mkdir -p "$IH14/.claude/agents"
 ln -s ./agents/orca.md "$IH14/.claude/agents/orca.md"
-( cd "$REPO_ROOT" && HOME="$IH14" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1 )
+(cd "$REPO_ROOT" && HOME="$IH14" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1)
 wassert 'uninstall: a RELATIVE symlink target is never ours, even from a checkout' \
   test "$(readlink "$IH14/.claude/agents/orca.md")" = ./agents/orca.md
 
 # ...and an absolute link whose root is NOT a checkout is not ours either:
 # the root must carry agents/orca.md AND install.sh, not just the one file
 # the link happens to name.
-IH15="$INST_TMP/h15"; mkdir -p "$IH15/.claude/agents"
-FAKEROOT="$INST_TMP/fakeroot"; mkdir -p "$FAKEROOT/agents"
-cp "$REPO_ROOT/agents/orca.md" "$FAKEROOT/agents/orca.md"   # no install.sh at the root
+IH15="$INST_TMP/h15"
+mkdir -p "$IH15/.claude/agents"
+FAKEROOT="$INST_TMP/fakeroot"
+mkdir -p "$FAKEROOT/agents"
+cp "$REPO_ROOT/agents/orca.md" "$FAKEROOT/agents/orca.md" # no install.sh at the root
 ln -s "$FAKEROOT/agents/orca.md" "$IH15/.claude/agents/orca.md"
 HOME="$IH15" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
 wassert 'uninstall: an absolute link into a NON-checkout root is not ours' \
@@ -1032,14 +1142,17 @@ wassert 'uninstall: an absolute link into a NON-checkout root is not ours' \
 # one uninstalling IS ours. This is the piped case (uninstall run from a
 # different copy than the install came from), so it must not need an exact
 # $ORCA_REPO match. A minimal second checkout stands in for it.
-REPO2="$INST_TMP/repo2"; mkdir -p "$REPO2/agents" "$REPO2/hooks" "$REPO2/scripts"
+REPO2="$INST_TMP/repo2"
+mkdir -p "$REPO2/agents" "$REPO2/hooks" "$REPO2/scripts"
 cp "$INSTALL_SH" "$REPO2/install.sh"
 cp "$REPO_ROOT/agents/orca.md" "$REPO2/agents/orca.md"
 cp "$HOOKS_DIR/orca-start-watcher.sh" "$REPO2/hooks/orca-start-watcher.sh"
 cp "$WATCH_SCRIPT" "$REPO2/scripts/gh-watch.sh"
-IH16="$INST_TMP/h16"; mkdir -p "$IH16"
+IH16="$INST_TMP/h16"
+mkdir -p "$IH16"
 ORCA_STYLE=claude HOME="$IH16" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-HOME="$IH16" sh "$REPO2/install.sh" --uninstall </dev/null >/dev/null 2>&1; RCU10=$?
+HOME="$IH16" sh "$REPO2/install.sh" --uninstall </dev/null >/dev/null 2>&1
+RCU10=$?
 wassert 'uninstall: from a different checkout exits 0' test "$RCU10" -eq 0
 wassert 'uninstall: a link into ANOTHER real checkout is still ours to remove' \
   bash -c "test ! -L '$IH16/.claude/agents/orca.md' && test ! -L '$IH16/.claude/scripts/gh-watch.sh'"
@@ -1048,7 +1161,8 @@ wassert 'uninstall: a link into ANOTHER real checkout is still ours to remove' \
 # reformatted. It has a SessionStart array (so the jq filter would happily
 # run and normalize the file) and deliberately compact formatting, which is
 # what makes the "nothing to remove -> do not touch it" short-circuit visible.
-IH17="$INST_TMP/h17"; mkdir -p "$IH17/.claude"
+IH17="$INST_TMP/h17"
+mkdir -p "$IH17/.claude"
 printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"mine.sh"}]}]},"model":"opus"}' \
   >"$IH17/.claude/settings.json"
 cp "$IH17/.claude/settings.json" "$INST_TMP/h17-settings.before"
@@ -1059,13 +1173,15 @@ wassert 'uninstall: a settings.json with nothing of ours is not rewritten at all
 # Best effort, not fail-fast: one unremovable file must not abort the sweep.
 # Everything after it still gets done, what stayed is named, and the exit
 # status reports the shortfall (root bypasses mode bits, so skip there).
-IH18="$INST_TMP/h18"; mkdir -p "$IH18"
+IH18="$INST_TMP/h18"
+mkdir -p "$IH18"
 ORCA_STYLE=claude HOME="$IH18" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 chmod 500 "$IH18/.claude/agents"
 if [[ "$(id -u)" -eq 0 ]]; then
   printf 'skip: uninstall: unremovable file (root bypasses mode bits)\n'
 else
-  OUTU6="$(HOME="$IH18" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU11=$?
+  OUTU6="$(HOME="$IH18" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+  RCU11=$?
   wassert 'uninstall: an unremovable file exits 1, not 0' test "$RCU11" -eq 1
   wassert 'uninstall: the sweep continues past it (later files still removed)' \
     bash -c "test ! -e '$IH18/.claude/scripts/gh-watch.sh'"
@@ -1079,11 +1195,13 @@ chmod u+rwx "$IH18/.claude/agents"
 # HOME empty, unset, or naming the filesystem root would make every target an
 # absolute path under / - refuse before removing anything. `/.` and `//` are
 # the same place spelled differently, and a pattern match alone misses them.
-UNOUT1="$(HOME= sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU6=$?
+UNOUT1="$(HOME= sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+RCU6=$?
 wassert 'uninstall: empty HOME exits 1, removes nothing' test "$RCU6" -eq 1
 printf '%s' "$UNOUT1" | grep -q 'refusing to uninstall' && UN_REFUSED=1 || UN_REFUSED=0
 wassert 'uninstall: empty HOME says why it refused' test "$UN_REFUSED" = 1
-UNOUT2="$(env -u HOME sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"; RCU7=$?
+UNOUT2="$(env -u HOME sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+RCU7=$?
 wassert 'uninstall: unset HOME exits 1, removes nothing' test "$RCU7" -eq 1
 for badhome in / // /. /tmp/..; do
   HOME="$badhome" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
@@ -1094,8 +1212,10 @@ done
 # set so a regression here would INSTALL (and be caught below) rather than
 # exit 2 down the no-style path, which would mask the bug behind the same
 # exit code; the message is asserted for the same reason.
-IH12="$INST_TMP/h12"; mkdir -p "$IH12"
-UNOUT3="$(ORCA_STYLE=claude HOME="$IH12" sh "$INSTALL_SH" --uninstal </dev/null 2>&1)"; RCU8=$?
+IH12="$INST_TMP/h12"
+mkdir -p "$IH12"
+UNOUT3="$(ORCA_STYLE=claude HOME="$IH12" sh "$INSTALL_SH" --uninstal </dev/null 2>&1)"
+RCU8=$?
 wassert 'install: an unrecognized option exits 2' test "$RCU8" -eq 2
 printf '%s' "$UNOUT3" | grep -q 'unrecognized option: --uninstal' && UN_BADOPT=1 || UN_BADOPT=0
 wassert 'install: an unrecognized option names the option it rejected' test "$UN_BADOPT" = 1
@@ -1115,14 +1235,16 @@ wassert 'install: an unrecognized option installs nothing' test ! -d "$IH12/.cla
 # settings.json that needs the hook wired: four entries, in install order,
 # each naming the absolute path it came from. cmp against the exact expected
 # file, so the numbering, the tab and the origins are all asserted at once.
-IM1="$INST_TMP/m1"; mkdir -p "$IM1/.claude/agents" "$IM1/.claude/hooks" "$IM1/.claude/scripts"
-printf 'previous agent\n'   >"$IM1/.claude/agents/orca.md"
-printf 'previous hook\n'    >"$IM1/.claude/hooks/orca-start-watcher.sh"
+IM1="$INST_TMP/m1"
+mkdir -p "$IM1/.claude/agents" "$IM1/.claude/hooks" "$IM1/.claude/scripts"
+printf 'previous agent\n' >"$IM1/.claude/agents/orca.md"
+printf 'previous hook\n' >"$IM1/.claude/hooks/orca-start-watcher.sh"
 printf 'previous watcher\n' >"$IM1/.claude/scripts/gh-watch.sh"
 printf '{\n  "model": "opus",\n  "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "mine.sh"}]}]}\n}\n' \
   >"$IM1/.claude/settings.json"
 cp "$IM1/.claude/settings.json" "$INST_TMP/m1-settings.before"
-OUTM1="$(ORCA_STYLE=claude HOME="$IM1" sh "$INSTALL_SH" </dev/null 2>&1)"; RCM1=$?
+OUTM1="$(ORCA_STYLE=claude HOME="$IM1" sh "$INSTALL_SH" </dev/null 2>&1)"
+RCM1=$?
 wassert 'manifest: (setup) claude-style install over existing files exits 0' test "$RCM1" -eq 0
 M1_RUN="$(ls "$IM1/.orca-backups" 2>/dev/null)"
 wassert 'manifest: one install makes exactly one run directory' \
@@ -1136,8 +1258,8 @@ wassert 'manifest: the backup copies hold the previous contents under their numb
   bash -c "grep -q 'previous agent' '$IM1/.orca-backups/$M1_RUN/01-orca.md' \
         && grep -q 'previous hook' '$IM1/.orca-backups/$M1_RUN/02-orca-start-watcher.sh' \
         && grep -q 'previous watcher' '$IM1/.orca-backups/$M1_RUN/03-gh-watch.sh'"
-printf '%s' "$OUTM1" | grep -qF "replaced files moved to $IM1/.orca-backups/$M1_RUN (after --uninstall, --restore $M1_RUN puts them back)" \
-  && M1_SAID=1 || M1_SAID=0
+printf '%s' "$OUTM1" | grep -qF "replaced files moved to $IM1/.orca-backups/$M1_RUN (after --uninstall, --restore $M1_RUN puts them back)" &&
+  M1_SAID=1 || M1_SAID=0
 wassert 'manifest: install names the run and how to put it back' test "$M1_SAID" = 1
 # The settings.json edit starts from the backup copy, not from an empty file:
 # the backup IS the pre-install file byte-for-byte, and the wired file still
@@ -1153,8 +1275,9 @@ wassert 'manifest: the settings.json edit kept the user SessionStart entry besid
 # agents style: the playbook's destination is AGENTS.md, which shares no
 # basename with the orca.md it is installed from - the case that made a
 # basename-only backup impossible to restore.
-IM2="$INST_TMP/m2"; mkdir -p "$IM2/.local/bin" "$IM2/.config/orca"
-printf 'previous watcher\n'  >"$IM2/.local/bin/gh-watch"
+IM2="$INST_TMP/m2"
+mkdir -p "$IM2/.local/bin" "$IM2/.config/orca"
+printf 'previous watcher\n' >"$IM2/.local/bin/gh-watch"
 printf 'previous playbook\n' >"$IM2/.config/orca/AGENTS.md"
 ORCA_STYLE=agents HOME="$IM2" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 M2_RUN="$(ls "$IM2/.orca-backups" 2>/dev/null)"
@@ -1165,7 +1288,9 @@ wassert 'manifest: agents style records its own destinations (AGENTS.md, not orc
 
 # custom CLAUDE_HOME: the origin is the custom path, never the ~/.claude
 # default; the run directory itself still lives under $HOME.
-IM3="$INST_TMP/m3"; CM3="$INST_TMP/cm3"; mkdir -p "$IM3" "$CM3/agents"
+IM3="$INST_TMP/m3"
+CM3="$INST_TMP/cm3"
+mkdir -p "$IM3" "$CM3/agents"
 printf 'previous agent\n' >"$CM3/agents/orca.md"
 ORCA_STYLE=claude HOME="$IM3" CLAUDE_HOME="$CM3" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 M3_RUN="$(ls "$IM3/.orca-backups" 2>/dev/null)"
@@ -1177,11 +1302,14 @@ wassert 'manifest: a custom CLAUDE_HOME is recorded as the origin, not ~/.claude
 # collision the numbering exists for is proven on backup() itself: the block
 # from TS= through the end of the function is lifted out of install.sh and
 # driven directly under a temp HOME.
-IM4="$INST_TMP/m4"; mkdir -p "$IM4/a" "$IM4/b"
-printf 'from a\n' >"$IM4/a/same.md"; printf 'from b\n' >"$IM4/b/same.md"
+IM4="$INST_TMP/m4"
+mkdir -p "$IM4/a" "$IM4/b"
+printf 'from a\n' >"$IM4/a/same.md"
+printf 'from b\n' >"$IM4/b/same.md"
 BACKUP_UNIT="$(sed -n '/^TS=/,/^}/p' "$INSTALL_SH")"
 HOME="$IM4" sh -c "set -eu; $BACKUP_UNIT; backup '$IM4/a/same.md'; backup '$IM4/b/same.md'" \
-  >/dev/null 2>&1; RCM4=$?
+  >/dev/null 2>&1
+RCM4=$?
 wassert 'manifest: (setup) backup() ran on two files sharing a basename' test "$RCM4" -eq 0
 M4_RUN="$(ls "$IM4/.orca-backups" 2>/dev/null)"
 wassert 'manifest: two files sharing a basename get distinct names, neither overwritten' \
@@ -1199,7 +1327,8 @@ HOME="$IM1" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
 cp "$IM1/.claude/settings.json" "$INST_TMP/m1-settings.after-uninstall"
 wassert 'restore: (setup) uninstall removed the installed files' \
   bash -c "test ! -e '$IM1/.claude/agents/orca.md' && test ! -e '$IM1/.claude/hooks/orca-start-watcher.sh'"
-OUTR1="$(HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null 2>&1)"; RCR1=$?
+OUTR1="$(HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null 2>&1)"
+RCR1=$?
 wassert 'restore: a known run exits 0' test "$RCR1" -eq 0
 wassert 'restore: absent files come back with their previous contents' \
   bash -c "grep -q 'previous agent' '$IM1/.claude/agents/orca.md' \
@@ -1209,8 +1338,8 @@ wassert 'restore: a restored file is a regular file, not a link into the backup'
   bash -c "test -f '$IM1/.claude/agents/orca.md' && test ! -L '$IM1/.claude/agents/orca.md'"
 wassert 'restore: settings.json is left exactly as uninstall left it' \
   cmp -s "$INST_TMP/m1-settings.after-uninstall" "$IM1/.claude/settings.json"
-printf '%s' "$OUTR1" | grep -qF "not restored: $IM1/.orca-backups/$M1_RUN/04-settings.json" \
-  && R1_NAMED=1 || R1_NAMED=0
+printf '%s' "$OUTR1" | grep -qF "not restored: $IM1/.orca-backups/$M1_RUN/04-settings.json" &&
+  R1_NAMED=1 || R1_NAMED=0
 wassert 'restore: names the settings.json backup it did not restore' test "$R1_NAMED" = 1
 printf '%s' "$OUTR1" | grep -q -- '--uninstall removes the hook' && R1_WHY=1 || R1_WHY=0
 wassert 'restore: says the hook entry is --uninstall business and the rest a manual merge' \
@@ -1220,7 +1349,8 @@ wassert 'restore: the backup copies stay on disk (copy, not move)' \
 
 # a second restore of the same run finds everything in place: all skips, no
 # change, exit 0
-OUTR2="$(HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null 2>&1)"; RCR2=$?
+OUTR2="$(HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null 2>&1)"
+RCR2=$?
 wassert 'restore: rerun exits 0' test "$RCR2" -eq 0
 # Anchored: an unanchored `restored:` also matches the `not restored:` line
 # that names the settings.json backup.
@@ -1232,21 +1362,24 @@ wassert 'restore: rerun restores nothing (everything is in place)' test "$R2_CHA
 # the whole-file revert stays a manual step and not a side effect of a
 # missing path.
 mv "$IM1/.claude/settings.json" "$INST_TMP/m1-settings.aside"
-HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null >/dev/null 2>&1; RCR2B=$?
+HOME="$IM1" sh "$INSTALL_SH" --restore "$M1_RUN" </dev/null >/dev/null 2>&1
+RCR2B=$?
 wassert 'restore: an absent settings.json is still not restored' test ! -e "$IM1/.claude/settings.json"
 wassert 'restore: an absent settings.json is not an error' test "$RCR2B" -eq 0
 mv "$INST_TMP/m1-settings.aside" "$IM1/.claude/settings.json"
 
 # never overwrites: a file already at an origin path stays and is reported;
 # the absent files in the same run are still put back.
-IM5="$INST_TMP/m5"; mkdir -p "$IM5/.claude/agents" "$IM5/.claude/hooks"
+IM5="$INST_TMP/m5"
+mkdir -p "$IM5/.claude/agents" "$IM5/.claude/hooks"
 printf 'previous agent\n' >"$IM5/.claude/agents/orca.md"
-printf 'previous hook\n'  >"$IM5/.claude/hooks/orca-start-watcher.sh"
+printf 'previous hook\n' >"$IM5/.claude/hooks/orca-start-watcher.sh"
 ORCA_STYLE=claude HOME="$IM5" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 HOME="$IM5" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
 printf 'mine now\n' >"$IM5/.claude/agents/orca.md"
 M5_RUN="$(ls "$IM5/.orca-backups" 2>/dev/null)"
-OUTR3="$(HOME="$IM5" sh "$INSTALL_SH" --restore "$M5_RUN" </dev/null 2>&1)"; RCR3=$?
+OUTR3="$(HOME="$IM5" sh "$INSTALL_SH" --restore "$M5_RUN" </dev/null 2>&1)"
+RCR3=$?
 wassert 'restore: exits 0 when some origin paths already exist' test "$RCR3" -eq 0
 wassert 'restore: a file already at an origin path is never overwritten' \
   bash -c "grep -q 'mine now' '$IM5/.claude/agents/orca.md'"
@@ -1260,7 +1393,8 @@ wassert 'restore: the absent files in the same run are still put back' \
 # back, AGENTS.md under its own name, with the directory recreated.
 HOME="$IM2" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
 wassert 'restore: (setup) agents-style uninstall removed ~/.config/orca' test ! -d "$IM2/.config/orca"
-HOME="$IM2" sh "$INSTALL_SH" --restore "$M2_RUN" </dev/null >/dev/null 2>&1; RCR4=$?
+HOME="$IM2" sh "$INSTALL_SH" --restore "$M2_RUN" </dev/null >/dev/null 2>&1
+RCR4=$?
 wassert 'restore: agents style exits 0' test "$RCR4" -eq 0
 wassert 'restore: AGENTS.md goes back under its own name, its directory recreated' \
   bash -c "grep -q 'previous playbook' '$IM2/.config/orca/AGENTS.md'"
@@ -1268,8 +1402,10 @@ wassert 'restore: the agents-style watcher goes back too' \
   bash -c "grep -q 'previous watcher' '$IM2/.local/bin/gh-watch'"
 
 # an unknown run: non-zero, named, and nothing changes
-IM6="$INST_TMP/m6"; mkdir -p "$IM6"
-OUTR5="$(HOME="$IM6" sh "$INSTALL_SH" --restore 19700101-000000 </dev/null 2>&1)"; RCR5=$?
+IM6="$INST_TMP/m6"
+mkdir -p "$IM6"
+OUTR5="$(HOME="$IM6" sh "$INSTALL_SH" --restore 19700101-000000 </dev/null 2>&1)"
+RCR5=$?
 wassert 'restore: an unknown run exits non-zero' test "$RCR5" -ne 0
 printf '%s' "$OUTR5" | grep -q 'unknown run: 19700101-000000' && R5_SAID=1 || R5_SAID=0
 wassert 'restore: an unknown run is named in the error' test "$R5_SAID" = 1
@@ -1278,7 +1414,8 @@ wassert 'restore: an unknown run changes nothing' test -z "$(ls -A "$IM6")"
 # the no-argument form lists the runs and their manifest entries, and
 # restores nothing
 rm -f "$IM5/.claude/hooks/orca-start-watcher.sh"
-OUTR6="$(HOME="$IM5" sh "$INSTALL_SH" --restore </dev/null 2>&1)"; RCR6=$?
+OUTR6="$(HOME="$IM5" sh "$INSTALL_SH" --restore </dev/null 2>&1)"
+RCR6=$?
 wassert 'restore: the no-argument form exits 0' test "$RCR6" -eq 0
 printf '%s' "$OUTR6" | grep -qxF "  $M5_RUN" && R6_RUN=1 || R6_RUN=0
 wassert 'restore: the no-argument form lists the run' test "$R6_RUN" = 1
@@ -1294,7 +1431,8 @@ printf 'old\n' >"$IM6/.orca-backups/20200101-000000/orca.md"
 OUTR7="$(HOME="$IM6" sh "$INSTALL_SH" --restore </dev/null 2>&1)"
 printf '%s' "$OUTR7" | grep -q 'no manifest: restore by hand' && R7_SAID=1 || R7_SAID=0
 wassert 'restore: a run with no manifest is listed as restore by hand' test "$R7_SAID" = 1
-OUTR8="$(HOME="$IM6" sh "$INSTALL_SH" --restore 20200101-000000 </dev/null 2>&1)"; RCR8=$?
+OUTR8="$(HOME="$IM6" sh "$INSTALL_SH" --restore 20200101-000000 </dev/null 2>&1)"
+RCR8=$?
 wassert 'restore: a run with no manifest exits non-zero' test "$RCR8" -ne 0
 printf '%s' "$OUTR8" | grep -q 'no manifest' && R8_SAID=1 || R8_SAID=0
 wassert 'restore: a run with no manifest says so' test "$R8_SAID" = 1
@@ -1303,22 +1441,25 @@ wassert 'restore: a run with no manifest changes nothing' test ! -d "$IM6/.claud
 # Like --uninstall, --restore is parsed before the bootstrap block and never
 # clones, fetches or re-execs: the same tripwire checkout catches a regression.
 rm -f "$STALE/EXECUTED"
-OUTP3="$( cd "$INST_TMP" && \
+OUTP3="$(cd "$INST_TMP" &&
   ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$STALE" \
-  HOME="$IM5" sh -s -- --restore <"$INSTALL_SH" 2>&1 )"; RCP3=$?
+    HOME="$IM5" sh -s -- --restore <"$INSTALL_SH" 2>&1)"
+RCP3=$?
 wassert 'restore: piped --restore exits 0' test "$RCP3" -eq 0
 wassert 'restore: piped --restore never re-execs the install.sh on disk' test ! -e "$STALE/EXECUTED"
 printf '%s' "$OUTP3" | grep -qxF "  $M5_RUN" && P3_LISTED=1 || P3_LISTED=0
 wassert 'restore: piped --restore lists the runs' test "$P3_LISTED" = 1
-( cd "$INST_TMP" && ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$IM5/absent" \
-  HOME="$IM5" sh -s -- --restore "$M5_RUN" <"$INSTALL_SH" >/dev/null 2>&1 ); RCP4=$?
+(cd "$INST_TMP" && ORCA_URL="file:///nonexistent-orca-remote" ORCA_REPO="$IM5/absent" \
+  HOME="$IM5" sh -s -- --restore "$M5_RUN" <"$INSTALL_SH" >/dev/null 2>&1)
+RCP4=$?
 wassert 'restore: piped --restore <run> with no checkout exits 0' test "$RCP4" -eq 0
 wassert 'restore: piped --restore clones nothing' test ! -e "$IM5/absent"
 wassert 'restore: piped --restore <run> puts the file back' \
   bash -c "grep -q 'previous hook' '$IM5/.claude/hooks/orca-start-watcher.sh'"
 
 # the same $HOME guard as uninstall: refuse before building a single path
-UNOUT5="$(HOME= sh "$INSTALL_SH" --restore </dev/null 2>&1)"; RCR9=$?
+UNOUT5="$(HOME= sh "$INSTALL_SH" --restore </dev/null 2>&1)"
+RCR9=$?
 wassert 'restore: empty HOME exits 1' test "$RCR9" -eq 1
 printf '%s' "$UNOUT5" | grep -q 'refusing to restore' && R9_REFUSED=1 || R9_REFUSED=0
 wassert 'restore: empty HOME says why it refused' test "$R9_REFUSED" = 1
@@ -1327,35 +1468,43 @@ wassert 'restore: empty HOME says why it refused' test "$R9_REFUSED" = 1
 # used to take `--uninstall` as the run name, and `--uninstall --restore`
 # silently let the last flag win. ORCA_STYLE is set so a fall-through would
 # INSTALL and be caught, not exit 2 down the no-style path.
-IM12="$INST_TMP/m12"; mkdir -p "$IM12"
-OUTA1="$(ORCA_STYLE=claude HOME="$IM12" sh "$INSTALL_SH" --restore --uninstall </dev/null 2>&1)"; RCA1=$?
+IM12="$INST_TMP/m12"
+mkdir -p "$IM12"
+OUTA1="$(ORCA_STYLE=claude HOME="$IM12" sh "$INSTALL_SH" --restore --uninstall </dev/null 2>&1)"
+RCA1=$?
 wassert 'install: --restore --uninstall exits 2' test "$RCA1" -eq 2
 printf '%s' "$OUTA1" | grep -qF 'use one of --uninstall, --restore' && A1_SAID=1 || A1_SAID=0
 wassert 'install: --restore --uninstall names the conflict' test "$A1_SAID" = 1
 wassert 'install: --restore --uninstall installs nothing' test ! -d "$IM12/.claude"
 ORCA_STYLE=claude HOME="$IM12" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
-OUTA2="$(HOME="$IM12" sh "$INSTALL_SH" --uninstall --restore </dev/null 2>&1)"; RCA2=$?
+OUTA2="$(HOME="$IM12" sh "$INSTALL_SH" --uninstall --restore </dev/null 2>&1)"
+RCA2=$?
 wassert 'install: --uninstall --restore exits 2' test "$RCA2" -eq 2
 printf '%s' "$OUTA2" | grep -qF 'use one of --uninstall, --restore' && A2_SAID=1 || A2_SAID=0
 wassert 'install: --uninstall --restore names the conflict' test "$A2_SAID" = 1
 wassert 'install: --uninstall --restore uninstalls nothing' test -L "$IM12/.claude/agents/orca.md"
-OUTA3="$(HOME="$IM12" sh "$INSTALL_SH" --restore --uninstal </dev/null 2>&1)"; RCA3=$?
+OUTA3="$(HOME="$IM12" sh "$INSTALL_SH" --restore --uninstal </dev/null 2>&1)"
+RCA3=$?
 wassert 'install: --restore --uninstal exits 2' test "$RCA3" -eq 2
 printf '%s' "$OUTA3" | grep -qF 'unrecognized option: --uninstal' && A3_SAID=1 || A3_SAID=0
 wassert 'install: a flag after --restore is an unrecognized option, not a run name' test "$A3_SAID" = 1
 
 # the run is a directory NAME: `..` and `x/..` would reach a MANIFEST outside
 # ~/.orca-backups/. One is planted where each spelling resolves.
-IM13="$INST_TMP/m13"; mkdir -p "$IM13/.orca-backups/2020/x"
-printf 'planted\t%s\n' "$IM13/pwned" >"$IM13/MANIFEST"; printf 'payload\n' >"$IM13/planted"
+IM13="$INST_TMP/m13"
+mkdir -p "$IM13/.orca-backups/2020/x"
+printf 'planted\t%s\n' "$IM13/pwned" >"$IM13/MANIFEST"
+printf 'payload\n' >"$IM13/planted"
 printf 'planted\t%s\n' "$IM13/pwned2" >"$IM13/.orca-backups/2020/x/MANIFEST"
 printf 'payload\n' >"$IM13/.orca-backups/2020/x/planted"
-OUTR12="$(HOME="$IM13" sh "$INSTALL_SH" --restore .. </dev/null 2>&1)"; RCR12=$?
+OUTR12="$(HOME="$IM13" sh "$INSTALL_SH" --restore .. </dev/null 2>&1)"
+RCR12=$?
 wassert 'restore: a run name of .. exits non-zero' test "$RCR12" -ne 0
 printf '%s' "$OUTR12" | grep -qF 'invalid run name: ..' && R12_SAID=1 || R12_SAID=0
 wassert 'restore: a run name of .. is refused as a name' test "$R12_SAID" = 1
 wassert 'restore: a run name of .. writes nothing' test ! -e "$IM13/pwned"
-OUTR13="$(HOME="$IM13" sh "$INSTALL_SH" --restore 2020/x </dev/null 2>&1)"; RCR13=$?
+OUTR13="$(HOME="$IM13" sh "$INSTALL_SH" --restore 2020/x </dev/null 2>&1)"
+RCR13=$?
 wassert 'restore: a run name with a slash exits non-zero' test "$RCR13" -ne 0
 printf '%s' "$OUTR13" | grep -qF 'invalid run name: 2020/x' && R13_SAID=1 || R13_SAID=0
 wassert 'restore: a run name with a slash is refused as a name' test "$R13_SAID" = 1
@@ -1375,20 +1524,24 @@ printf '01-x\trelative/pwned5\n' >"$IM14/.orca-backups/r3/MANIFEST"
 printf 'payload\n' >"$IM14/.orca-backups/r3/01-x"
 printf '../../planted\t%s\n01-good\t%s\n' "$IM14/pwned6" "$IM14/restored-ok" >"$IM14/.orca-backups/r4/MANIFEST"
 printf 'good\n' >"$IM14/.orca-backups/r4/01-good"
-OUTR14="$( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r1 </dev/null 2>&1 )"; RCR14=$?
+OUTR14="$(cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r1 </dev/null 2>&1)"
+RCR14=$?
 wassert 'restore: a manifest name with a slash exits non-zero' test "$RCR14" -ne 0
 printf '%s' "$OUTR14" | grep -qF '! bad manifest line, not restored: ../../planted' && R14_SAID=1 || R14_SAID=0
 wassert 'restore: a manifest name with a slash is reported as a bad line' test "$R14_SAID" = 1
 wassert 'restore: a manifest name with a slash writes nothing' test ! -e "$IM14/pwned3"
-OUTR15="$( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r2 </dev/null 2>&1 )"; RCR15=$?
+OUTR15="$(cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r2 </dev/null 2>&1)"
+RCR15=$?
 wassert 'restore: an empty manifest name exits non-zero' test "$RCR15" -ne 0
 printf '%s' "$OUTR15" | grep -qF '! bad manifest line' && R15_SAID=1 || R15_SAID=0
 wassert 'restore: an empty manifest name is reported as a bad line' test "$R15_SAID" = 1
-( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r3 </dev/null >/dev/null 2>&1 ); RCR16=$?
+(cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r3 </dev/null >/dev/null 2>&1)
+RCR16=$?
 wassert 'restore: a relative manifest origin exits non-zero' test "$RCR16" -ne 0
 wassert 'restore: a relative manifest origin writes nothing, not even under the cwd' \
   test ! -e "$INST_TMP/relative/pwned5"
-( cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r4 </dev/null >/dev/null 2>&1 ); RCR17=$?
+(cd "$INST_TMP" && HOME="$IM14" sh "$INSTALL_SH" --restore r4 </dev/null >/dev/null 2>&1)
+RCR17=$?
 wassert 'restore: one bad line still fails the run' test "$RCR17" -ne 0
 wassert 'restore: a bad line is skipped and the good line after it still goes back' \
   bash -c "test ! -e '$IM14/pwned6' && grep -q good '$IM14/restored-ok'"
@@ -1396,28 +1549,31 @@ wassert 'restore: a bad line is skipped and the good line after it still goes ba
 # a relative CLAUDE_HOME: the origin is recorded absolute, anchored to the
 # directory install ran from, so --restore run from anywhere else still
 # lands it there and never under its own cwd.
-IM8="$INST_TMP/m8"; mkdir -p "$IM8/cwd/relch/agents"
+IM8="$INST_TMP/m8"
+mkdir -p "$IM8/cwd/relch/agents"
 printf 'previous agent\n' >"$IM8/cwd/relch/agents/orca.md"
-( cd "$IM8/cwd" && ORCA_STYLE=claude HOME="$IM8" CLAUDE_HOME=relch sh "$INSTALL_SH" </dev/null >/dev/null 2>&1 )
+(cd "$IM8/cwd" && ORCA_STYLE=claude HOME="$IM8" CLAUDE_HOME=relch sh "$INSTALL_SH" </dev/null >/dev/null 2>&1)
 M8_RUN="$(ls "$IM8/.orca-backups" 2>/dev/null)"
 printf '01-orca.md\t%s\n' "$IM8/cwd/relch/agents/orca.md" >"$INST_TMP/m8-manifest.expected"
 wassert 'manifest: a relative CLAUDE_HOME is recorded as an absolute origin' \
   cmp -s "$INST_TMP/m8-manifest.expected" "$IM8/.orca-backups/$M8_RUN/MANIFEST"
-( cd "$IM8/cwd" && HOME="$IM8" CLAUDE_HOME=relch sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1 )
-( cd "$INST_TMP" && HOME="$IM8" sh "$INSTALL_SH" --restore "$M8_RUN" </dev/null >/dev/null 2>&1 )
+(cd "$IM8/cwd" && HOME="$IM8" CLAUDE_HOME=relch sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1)
+(cd "$INST_TMP" && HOME="$IM8" sh "$INSTALL_SH" --restore "$M8_RUN" </dev/null >/dev/null 2>&1)
 wassert 'restore: a relative-CLAUDE_HOME backup goes back where it came from, not under the cwd' \
   bash -c "grep -q 'previous agent' '$IM8/cwd/relch/agents/orca.md' && test ! -e '$INST_TMP/relch'"
 
 # a backed-up symlink returns as a symlink with the same target - the
 # common case is a link left by an install from another checkout. A plain
 # cp would follow it and put back a regular file holding the target's bytes.
-IM9="$INST_TMP/m9"; mkdir -p "$IM9/.claude/agents" "$IM9/mine"
+IM9="$INST_TMP/m9"
+mkdir -p "$IM9/.claude/agents" "$IM9/mine"
 printf 'my agent\n' >"$IM9/mine/agent.md"
 ln -s "$IM9/mine/agent.md" "$IM9/.claude/agents/orca.md"
 ORCA_STYLE=claude HOME="$IM9" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 HOME="$IM9" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
 M9_RUN="$(ls "$IM9/.orca-backups" 2>/dev/null)"
-HOME="$IM9" sh "$INSTALL_SH" --restore "$M9_RUN" </dev/null >/dev/null 2>&1; RCR18=$?
+HOME="$IM9" sh "$INSTALL_SH" --restore "$M9_RUN" </dev/null >/dev/null 2>&1
+RCR18=$?
 wassert 'restore: a backed-up symlink exits 0' test "$RCR18" -eq 0
 wassert 'restore: a backed-up symlink comes back as a symlink, not a copy of its target' \
   test -L "$IM9/.claude/agents/orca.md"
@@ -1426,26 +1582,29 @@ wassert 'restore: the restored symlink keeps its original target' \
 
 # a dangling symlink at an origin is still "something there": -e alone
 # would miss it, and the copy would then write over or through it.
-IM11="$INST_TMP/m11"; mkdir -p "$IM11/.claude/hooks"
+IM11="$INST_TMP/m11"
+mkdir -p "$IM11/.claude/hooks"
 printf 'previous hook\n' >"$IM11/.claude/hooks/orca-start-watcher.sh"
 ORCA_STYLE=claude HOME="$IM11" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 HOME="$IM11" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
 ln -s /nonexistent-orca-target "$IM11/.claude/hooks/orca-start-watcher.sh"
 M11_RUN="$(ls "$IM11/.orca-backups" 2>/dev/null)"
-OUTR19="$(HOME="$IM11" sh "$INSTALL_SH" --restore "$M11_RUN" </dev/null 2>&1)"; RCR19=$?
+OUTR19="$(HOME="$IM11" sh "$INSTALL_SH" --restore "$M11_RUN" </dev/null 2>&1)"
+RCR19=$?
 wassert 'restore: a dangling symlink at an origin exits 0' test "$RCR19" -eq 0
 wassert 'restore: a dangling symlink at an origin is left untouched' \
   test "$(readlink "$IM11/.claude/hooks/orca-start-watcher.sh")" = /nonexistent-orca-target
-printf '%s' "$OUTR19" | grep -qF "skipped: exists - $IM11/.claude/hooks/orca-start-watcher.sh" \
-  && R19_SKIP=1 || R19_SKIP=0
+printf '%s' "$OUTR19" | grep -qF "skipped: exists - $IM11/.claude/hooks/orca-start-watcher.sh" &&
+  R19_SKIP=1 || R19_SKIP=0
 wassert 'restore: a dangling symlink at an origin is reported as skipped: exists' test "$R19_SKIP" = 1
 
 # Best effort, not fail-fast: a copy that fails is named, the sweep goes on,
 # and the exit status reports it - the mirror of uninstall's unremovable
 # file above (root bypasses mode bits, so skip there).
-IM10="$INST_TMP/m10"; mkdir -p "$IM10/.claude/agents" "$IM10/.claude/hooks"
+IM10="$INST_TMP/m10"
+mkdir -p "$IM10/.claude/agents" "$IM10/.claude/hooks"
 printf 'previous agent\n' >"$IM10/.claude/agents/orca.md"
-printf 'previous hook\n'  >"$IM10/.claude/hooks/orca-start-watcher.sh"
+printf 'previous hook\n' >"$IM10/.claude/hooks/orca-start-watcher.sh"
 ORCA_STYLE=claude HOME="$IM10" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
 HOME="$IM10" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
 M10_RUN="$(ls "$IM10/.orca-backups" 2>/dev/null)"
@@ -1453,7 +1612,8 @@ chmod 555 "$IM10/.claude/agents"
 if [[ "$(id -u)" -eq 0 ]]; then
   printf 'skip: restore: unwritable origin directory (root bypasses mode bits)\n'
 else
-  OUTR20="$(HOME="$IM10" sh "$INSTALL_SH" --restore "$M10_RUN" </dev/null 2>&1)"; RCR20=$?
+  OUTR20="$(HOME="$IM10" sh "$INSTALL_SH" --restore "$M10_RUN" </dev/null 2>&1)"
+  RCR20=$?
   wassert 'restore: a copy that fails exits 1, not 0' test "$RCR20" -eq 1
   printf '%s' "$OUTR20" | grep -qF "! could not restore $IM10/.claude/agents/orca.md" && R20_SAID=1 || R20_SAID=0
   wassert 'restore: the failed copy is named on stdout' test "$R20_SAID" = 1

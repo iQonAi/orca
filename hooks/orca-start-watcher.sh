@@ -65,9 +65,9 @@ remote_url="$(git -C "$cwd" config --get remote.origin.url 2>/dev/null || true)"
 
 # Normalize both SSH (git@host:owner/repo.git) and HTTPS
 # (https://host/owner/repo.git) forms down to owner/repo.
-repo_path="${remote_url%.git}"          # strip trailing .git
-repo_path="${repo_path#*://*/}"          # strip https://host/ prefix (if any)
-repo_path="${repo_path#*:}"              # strip git@host: prefix (if any)
+repo_path="${remote_url%.git}"  # strip trailing .git
+repo_path="${repo_path#*://*/}" # strip https://host/ prefix (if any)
+repo_path="${repo_path#*:}"     # strip git@host: prefix (if any)
 # repo_path should now be owner/repo; keep only the last two path segments.
 owner="$(printf '%s' "$repo_path" | awk -F/ '{ if (NF>=2) print $(NF-1) }')"
 name="$(printf '%s' "$repo_path" | awk -F/ '{ print $NF }')"

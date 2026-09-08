@@ -17,52 +17,68 @@ ORCA_REF="${ORCA_REF:-v0.1.0}"
 ACTION=install
 RESTORE_RUN=
 while [ $# -gt 0 ]; do
-    case "$1" in
-        # One action per run: a second action flag is refused, never silently
-        # the winner.
-        --uninstall)
-            [ "$ACTION" = install ] || { echo "use one of --uninstall, --restore" >&2; exit 2; }
-            ACTION=uninstall ;;
-        # Alone it lists the backup runs; with a run name it puts that run
-        # back. A value leading with `-` is a flag, not a run name: it is left
-        # in place for the next round to reject.
-        --restore)
-            [ "$ACTION" = install ] || { echo "use one of --uninstall, --restore" >&2; exit 2; }
-            ACTION=restore
-            if [ $# -gt 1 ]; then
-                case "$2" in -*) ;; *) shift; RESTORE_RUN=$1 ;; esac
-            fi ;;
-        # Rejected rather than ignored: a typo'd flag must not silently run
-        # the opposite action of the one that was asked for.
-        *) echo "unrecognized option: $1" >&2; exit 2 ;;
-    esac
-    shift
+  case "$1" in
+    # One action per run: a second action flag is refused, never silently
+    # the winner.
+    --uninstall)
+      [ "$ACTION" = install ] || {
+        echo "use one of --uninstall, --restore" >&2
+        exit 2
+      }
+      ACTION=uninstall
+      ;;
+    # Alone it lists the backup runs; with a run name it puts that run
+    # back. A value leading with `-` is a flag, not a run name: it is left
+    # in place for the next round to reject.
+    --restore)
+      [ "$ACTION" = install ] || {
+        echo "use one of --uninstall, --restore" >&2
+        exit 2
+      }
+      ACTION=restore
+      if [ $# -gt 1 ]; then
+        case "$2" in -*) ;; *)
+          shift
+          RESTORE_RUN=$1
+          ;;
+        esac
+      fi
+      ;;
+    # Rejected rather than ignored: a typo'd flag must not silently run
+    # the opposite action of the one that was asked for.
+    *)
+      echo "unrecognized option: $1" >&2
+      exit 2
+      ;;
+  esac
+  shift
 done
 
 if [ "$ACTION" != install ]; then
-    # Every uninstall/restore target is built from $HOME, so it is normalized and
-    # vetted HERE - before the bootstrap block below builds its first path
-    # from it. `cd`+`pwd` collapses the spellings a pattern match misses
-    # (`/.`, `/tmp/..`, a relative or non-existent $HOME) to one canonical
-    # form; `//` survives it (POSIX leaves a leading `//` implementation-
-    # defined) so it is rejected explicitly. Logical `pwd`, not `pwd -P`: a
-    # symlinked $HOME reaches the same files, and rewriting it to the
-    # physical path would only make the output unrecognizable to the user.
-    # The -n test is load-bearing, not belt-and-braces: `cd ""` SUCCEEDS and
-    # stays put, so an empty $HOME would resolve to the caller's cwd and sail
-    # through every check below.
-    # SC1007: see the CDPATH= note below.
-    HOME_DIR=
-    if [ -n "${HOME:-}" ]; then
-        # shellcheck disable=SC1007
-        HOME_DIR=$(CDPATH= cd -- "$HOME" 2>/dev/null && pwd) || HOME_DIR=
-    fi
-    case "$HOME_DIR" in
-        ""|/|//)
-            echo "refusing to $ACTION: HOME must be a usable directory, not '${HOME-<unset>}'" >&2
-            exit 1 ;;
-    esac
-    HOME=$HOME_DIR
+  # Every uninstall/restore target is built from $HOME, so it is normalized and
+  # vetted HERE - before the bootstrap block below builds its first path
+  # from it. `cd`+`pwd` collapses the spellings a pattern match misses
+  # (`/.`, `/tmp/..`, a relative or non-existent $HOME) to one canonical
+  # form; `//` survives it (POSIX leaves a leading `//` implementation-
+  # defined) so it is rejected explicitly. Logical `pwd`, not `pwd -P`: a
+  # symlinked $HOME reaches the same files, and rewriting it to the
+  # physical path would only make the output unrecognizable to the user.
+  # The -n test is load-bearing, not belt-and-braces: `cd ""` SUCCEEDS and
+  # stays put, so an empty $HOME would resolve to the caller's cwd and sail
+  # through every check below.
+  # SC1007: see the CDPATH= note below.
+  HOME_DIR=
+  if [ -n "${HOME:-}" ]; then
+    # shellcheck disable=SC1007
+    HOME_DIR=$(CDPATH= cd -- "$HOME" 2>/dev/null && pwd) || HOME_DIR=
+  fi
+  case "$HOME_DIR" in
+    "" | / | //)
+      echo "refusing to $ACTION: HOME must be a usable directory, not '${HOME-<unset>}'" >&2
+      exit 1
+      ;;
+  esac
+  HOME=$HOME_DIR
 fi
 
 # Trust $0 only when it is a real file: under `curl | sh` $0 is the shell
@@ -70,95 +86,111 @@ fi
 # contain agents/orca.md hijack the install source.
 script_dir=
 if [ -f "$0" ]; then
-   # SC1007: `CDPATH=` is a deliberate env prefix scoped to this one `cd`, not a
-   # botched assignment - it stops a user's CDPATH from making `cd` land (and
-   # print) somewhere else. The space after `=` is what the idiom requires.
-   # shellcheck disable=SC1007
-   script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || script_dir=
+  # SC1007: `CDPATH=` is a deliberate env prefix scoped to this one `cd`, not a
+  # botched assignment - it stops a user's CDPATH from making `cd` land (and
+  # print) somewhere else. The space after `=` is what the idiom requires.
+  # shellcheck disable=SC1007
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd) || script_dir=
 fi
 if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
-   # Piped (or stray copy): bootstrap durable checkout, then re-execute from it.
-   ORCA_REPO="${ORCA_REPO:-$HOME/.local/share/orca}"
-   # A quoted ORCA_REPO="~/x" reaches us with a literal tilde - expand it.
-   # SC2088 fires on the `"~"` and `"~/"*` case PATTERNS. It is spurious there:
-   # a pattern is only ever matched against, never expanded, so there is no
-   # expansion to fix. It sits on the `case` and not on the one branch because
-   # ShellCheck rejects branch-level directives outright (SC1124).
-   # The strip pattern in the second branch is quoted for the same reason the
-   # patterns are: unquoted, `${ORCA_REPO#~/}` tilde-expands its OWN pattern to
-   # `$HOME/`, never strips the literal `~/`, and resolves "~/x" to "$HOME/~/x"
-   # - a directory literally named `~`. That was #24; test/run.sh now covers it.
-   # shellcheck disable=SC2088
-   case "$ORCA_REPO" in
-       "~") ORCA_REPO="$HOME" ;;
-       "~/"*) ORCA_REPO="$HOME/${ORCA_REPO#"~/"}" ;;
-   esac
-   if [ "$ACTION" != install ]; then
-       # Teardown and restore never fetch and never re-execute. Not fetching,
-       # because uninstall that needs the network (or git) is broken by
-       # design, and because `pull` would mutate the very checkout that
-       # copy-mode provenance compares against - silently turning orca's own
-       # files into "not ours" and leaving them installed. Not re-executing,
-       # because the copy on disk may predate --uninstall and would install.
-       # The checkout is a read-only reference here, nothing more; without
-       # one, links are still verifiable but copies are not.
-       [ -f "$ORCA_REPO/agents/orca.md" ] || ORCA_REPO=
-   else
-       command -v git >/dev/null 2>&1 || { echo "git is required" >&2; exit 1; }
-       if [ ! -f "$ORCA_REPO/agents/orca.md" ]; then
-           # advice.detachedHead off: a clone at a tag is detached by design,
-           # and the note git prints about it is noise in a curl | sh install.
-           # `--` before the positionals: ORCA_URL and ORCA_REF are operator
-           # input, and a value that leads with `-` must reach git as a value,
-           # never as an option (`--upload-pack=<cmd>` runs a command).
-           git -c advice.detachedHead=false clone --depth 1 --branch "$ORCA_REF" -- "$ORCA_URL" "$ORCA_REPO" \
-             || { echo "could not clone orca $ORCA_REF from $ORCA_URL" >&2; exit 1; }
-       else
-           # A piped install means "give me the pinned orca" - move the
-           # checkout to ORCA_REF, whatever branch or tag it was left on.
-           # Fetched from ORCA_URL, not from whatever remote the checkout
-           # carries, so an override is honoured and a checkout with no
-           # `origin` still works; the checkout's own remote is left alone.
-           # A tag is fetched with a destination so it lands locally, not
-           # only in FETCH_HEAD: a bare fetch keeps no tag, and the version
-           # line at the end reads it back. A name that is not a tag
-           # (ORCA_REF=main) falls through to a plain fetch. A ref that exists
-           # nowhere fails here, before anything is installed. `--` as above.
-           git -C "$ORCA_REPO" fetch -q --depth 1 -- "$ORCA_URL" "+refs/tags/$ORCA_REF:refs/tags/$ORCA_REF" 2>/dev/null \
-             || git -C "$ORCA_REPO" fetch -q --depth 1 -- "$ORCA_URL" "$ORCA_REF" \
-             || { echo "could not fetch $ORCA_REF from $ORCA_URL into $ORCA_REPO" >&2; exit 1; }
-           git -C "$ORCA_REPO" checkout -q --detach FETCH_HEAD
-       fi
-       exec "$ORCA_REPO/install.sh" "$@"
-   fi
+  # Piped (or stray copy): bootstrap durable checkout, then re-execute from it.
+  ORCA_REPO="${ORCA_REPO:-$HOME/.local/share/orca}"
+  # A quoted ORCA_REPO="~/x" reaches us with a literal tilde - expand it.
+  # SC2088 fires on the `"~"` and `"~/"*` case PATTERNS. It is spurious there:
+  # a pattern is only ever matched against, never expanded, so there is no
+  # expansion to fix. It sits on the `case` and not on the one branch because
+  # ShellCheck rejects branch-level directives outright (SC1124).
+  # The strip pattern in the second branch is quoted for the same reason the
+  # patterns are: unquoted, `${ORCA_REPO#~/}` tilde-expands its OWN pattern to
+  # `$HOME/`, never strips the literal `~/`, and resolves "~/x" to "$HOME/~/x"
+  # - a directory literally named `~`. That was #24; test/run.sh now covers it.
+  # shellcheck disable=SC2088
+  case "$ORCA_REPO" in
+    "~") ORCA_REPO="$HOME" ;;
+    "~/"*) ORCA_REPO="$HOME/${ORCA_REPO#"~/"}" ;;
+  esac
+  if [ "$ACTION" != install ]; then
+    # Teardown and restore never fetch and never re-execute. Not fetching,
+    # because uninstall that needs the network (or git) is broken by
+    # design, and because `pull` would mutate the very checkout that
+    # copy-mode provenance compares against - silently turning orca's own
+    # files into "not ours" and leaving them installed. Not re-executing,
+    # because the copy on disk may predate --uninstall and would install.
+    # The checkout is a read-only reference here, nothing more; without
+    # one, links are still verifiable but copies are not.
+    [ -f "$ORCA_REPO/agents/orca.md" ] || ORCA_REPO=
+  else
+    command -v git >/dev/null 2>&1 || {
+      echo "git is required" >&2
+      exit 1
+    }
+    if [ ! -f "$ORCA_REPO/agents/orca.md" ]; then
+      # advice.detachedHead off: a clone at a tag is detached by design,
+      # and the note git prints about it is noise in a curl | sh install.
+      # `--` before the positionals: ORCA_URL and ORCA_REF are operator
+      # input, and a value that leads with `-` must reach git as a value,
+      # never as an option (`--upload-pack=<cmd>` runs a command).
+      git -c advice.detachedHead=false clone --depth 1 --branch "$ORCA_REF" -- "$ORCA_URL" "$ORCA_REPO" ||
+        {
+          echo "could not clone orca $ORCA_REF from $ORCA_URL" >&2
+          exit 1
+        }
+    else
+      # A piped install means "give me the pinned orca" - move the
+      # checkout to ORCA_REF, whatever branch or tag it was left on.
+      # Fetched from ORCA_URL, not from whatever remote the checkout
+      # carries, so an override is honoured and a checkout with no
+      # `origin` still works; the checkout's own remote is left alone.
+      # A tag is fetched with a destination so it lands locally, not
+      # only in FETCH_HEAD: a bare fetch keeps no tag, and the version
+      # line at the end reads it back. A name that is not a tag
+      # (ORCA_REF=main) falls through to a plain fetch. A ref that exists
+      # nowhere fails here, before anything is installed. `--` as above.
+      git -C "$ORCA_REPO" fetch -q --depth 1 -- "$ORCA_URL" "+refs/tags/$ORCA_REF:refs/tags/$ORCA_REF" 2>/dev/null ||
+        git -C "$ORCA_REPO" fetch -q --depth 1 -- "$ORCA_URL" "$ORCA_REF" ||
+        {
+          echo "could not fetch $ORCA_REF from $ORCA_URL into $ORCA_REPO" >&2
+          exit 1
+        }
+      git -C "$ORCA_REPO" checkout -q --detach FETCH_HEAD
+    fi
+    exec "$ORCA_REPO/install.sh" "$@"
+  fi
 else
-   ORCA_REPO="$script_dir"
+  ORCA_REPO="$script_dir"
 fi
 
 resolve_style() {
-    case "${ORCA_STYLE:-}" in claude|agents) STYLE=$ORCA_STYLE; return 0 ;; esac
-    if [ -e /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
-        printf 'Install orca for which configuration style?\n' >/dev/tty
-        printf '  1) claude  - ~/.claude layout, settings.json hook wiring\n' >/dev/tty
-        printf '  2) agents  - AGENTS.md convention (Codex/Cursor/Gemini-class)\n' >/dev/tty
-        printf 'choice [1/2]: ' >/dev/tty
-        read -r ans </dev/tty
-        case "$ans" in
-           1|claude) STYLE=claude ;;
-           2|agents) STYLE=agents ;;
-           *) echo "unrecognized choice: $ans" >&2; exit 2 ;;
-        esac
-    else
-        # An existing ~/.claude is not consent: inferring the claude style from
-        # it edited settings.json on a guess, with only a notice (#16). A value
-        # that is set but not a style (a typo in CI) is named, not called unset.
-        if [ -n "${ORCA_STYLE:-}" ]; then
-            echo "no tty and ORCA_STYLE=$ORCA_STYLE is not claude or agents; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
-        else
-            echo "no tty and ORCA_STYLE unset; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
-        fi
+  case "${ORCA_STYLE:-}" in claude | agents)
+    STYLE=$ORCA_STYLE
+    return 0
+    ;;
+  esac
+  if [ -e /dev/tty ] && (: </dev/tty) 2>/dev/null; then
+    printf 'Install orca for which configuration style?\n' >/dev/tty
+    printf '  1) claude  - ~/.claude layout, settings.json hook wiring\n' >/dev/tty
+    printf '  2) agents  - AGENTS.md convention (Codex/Cursor/Gemini-class)\n' >/dev/tty
+    printf 'choice [1/2]: ' >/dev/tty
+    read -r ans </dev/tty
+    case "$ans" in
+      1 | claude) STYLE=claude ;;
+      2 | agents) STYLE=agents ;;
+      *)
+        echo "unrecognized choice: $ans" >&2
         exit 2
+        ;;
+    esac
+  else
+    # An existing ~/.claude is not consent: inferring the claude style from
+    # it edited settings.json on a guess, with only a notice (#16). A value
+    # that is set but not a style (a typo in CI) is named, not called unset.
+    if [ -n "${ORCA_STYLE:-}" ]; then
+      echo "no tty and ORCA_STYLE=$ORCA_STYLE is not claude or agents; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
+    else
+      echo "no tty and ORCA_STYLE unset; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
     fi
+    exit 2
+  fi
 }
 
 TS=$(date +%Y%m%d-%H%M%S)
@@ -167,103 +199,115 @@ BACKUP_N=0
 BACKUP_DST=
 
 backup() { # move an existing target aside, once-per-run dir
-    [ -e "$1" ] || [ -L "$1" ] || return 0
-    [ -n "$BACKUP_DIR" ] || { BACKUP_DIR="$HOME/.orca-backups/$TS"; mkdir -p "$BACKUP_DIR"; }
-    # Numbered, so two targets sharing a basename can never overwrite each
-    # other in the run directory, and recorded in MANIFEST as
-    # `<name><TAB><origin path>` so --restore can put each one back exactly
-    # where it came from (AGENTS.md does not even share a basename with the
-    # source it was installed from). The destination is left in BACKUP_DST
-    # for the caller. One path per line, tab-separated: a path holding a
-    # newline cannot be represented, and such a HOME already breaks the hook
-    # path the installer writes into settings.json.
-    # The origin is recorded absolute: a relative target (CLAUDE_HOME=relch)
-    # is anchored to the directory it was moved from, so --restore puts it
-    # back there no matter where it is run from later.
-    origin=$1
-    case "$origin" in /*) ;; *) origin="$PWD/$origin" ;; esac
-    BACKUP_N=$((BACKUP_N + 1))
-    BACKUP_DST="$BACKUP_DIR/$(printf '%02d' "$BACKUP_N")-${1##*/}"
-    mv "$1" "$BACKUP_DST"
-    printf '%s\t%s\n' "${BACKUP_DST##*/}" "$origin" >> "$BACKUP_DIR/MANIFEST"
-    echo "backup: $1 -> $BACKUP_DST"
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  [ -n "$BACKUP_DIR" ] || {
+    BACKUP_DIR="$HOME/.orca-backups/$TS"
+    mkdir -p "$BACKUP_DIR"
+  }
+  # Numbered, so two targets sharing a basename can never overwrite each
+  # other in the run directory, and recorded in MANIFEST as
+  # `<name><TAB><origin path>` so --restore can put each one back exactly
+  # where it came from (AGENTS.md does not even share a basename with the
+  # source it was installed from). The destination is left in BACKUP_DST
+  # for the caller. One path per line, tab-separated: a path holding a
+  # newline cannot be represented, and such a HOME already breaks the hook
+  # path the installer writes into settings.json.
+  # The origin is recorded absolute: a relative target (CLAUDE_HOME=relch)
+  # is anchored to the directory it was moved from, so --restore puts it
+  # back there no matter where it is run from later.
+  origin=$1
+  case "$origin" in /*) ;; *) origin="$PWD/$origin" ;; esac
+  BACKUP_N=$((BACKUP_N + 1))
+  BACKUP_DST="$BACKUP_DIR/$(printf '%02d' "$BACKUP_N")-${1##*/}"
+  mv "$1" "$BACKUP_DST"
+  printf '%s\t%s\n' "${BACKUP_DST##*/}" "$origin" >>"$BACKUP_DIR/MANIFEST"
+  echo "backup: $1 -> $BACKUP_DST"
 }
 
 install_one() { # $1 src, $2 dst - link by default, ORCA_MODE=copy to copy
-    if [ "${ORCA_MODE:-link}" = link ] && [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; then
-        echo "    ok: $2 (already linked)"; return 0
-    fi
-    if [ "${ORCA_MODE:-link}" = copy ] && [ -f "$2" ] && [ ! -L "$2" ] && cmp -s "$1" "$2"; then
-        echo "    ok: $2 (already current)"; return 0
-    fi
-   backup "$2"
+  if [ "${ORCA_MODE:-link}" = link ] && [ -L "$2" ] && [ "$(readlink "$2")" = "$1" ]; then
+    echo "    ok: $2 (already linked)"
+    return 0
+  fi
+  if [ "${ORCA_MODE:-link}" = copy ] && [ -f "$2" ] && [ ! -L "$2" ] && cmp -s "$1" "$2"; then
+    echo "    ok: $2 (already current)"
+    return 0
+  fi
+  backup "$2"
   if [ "${ORCA_MODE:-link}" = link ]; then ln -s "$1" "$2"; else cp "$1" "$2"; fi
   echo "    installed: $2"
 }
 
 install_claude() {
-    CH="${CLAUDE_HOME:-$HOME/.claude}"
-    # Trailing slashes are dropped: `/x/` is the same home as `/x`, but the
-    # hook identity built from it would read `/x//hooks/...` and match neither
-    # a hand-wired `/x/hooks/...` nor, on --uninstall, its own entry (#38).
-    # The inner expansion is the trailing run of slashes; the outer strips it.
-    CH="${CH%"${CH##*[!/]}"}"
-    mkdir -p "$CH/agents" "$CH/hooks" "$CH/scripts"
-    install_one "$ORCA_REPO/agents/orca.md"     "$CH/agents/orca.md"
-    install_one "$ORCA_REPO/hooks/orca-start-watcher.sh" "$CH/hooks/orca-start-watcher.sh"
-    install_one "$ORCA_REPO/scripts/gh-watch.sh" "$CH/scripts/gh-watch.sh"
-    wire_claude_hook "$CH/settings.json"
+  CH="${CLAUDE_HOME:-$HOME/.claude}"
+  # Trailing slashes are dropped: `/x/` is the same home as `/x`, but the
+  # hook identity built from it would read `/x//hooks/...` and match neither
+  # a hand-wired `/x/hooks/...` nor, on --uninstall, its own entry (#38).
+  # The inner expansion is the trailing run of slashes; the outer strips it.
+  CH="${CH%"${CH##*[!/]}"}"
+  mkdir -p "$CH/agents" "$CH/hooks" "$CH/scripts"
+  install_one "$ORCA_REPO/agents/orca.md" "$CH/agents/orca.md"
+  install_one "$ORCA_REPO/hooks/orca-start-watcher.sh" "$CH/hooks/orca-start-watcher.sh"
+  install_one "$ORCA_REPO/scripts/gh-watch.sh" "$CH/scripts/gh-watch.sh"
+  wire_claude_hook "$CH/settings.json"
 }
 
 wire_claude_hook() {
-    # The default install keeps the ~ form so the entry matches (and dedupes
-    # against) ones written by hand or by older installers; a custom
-    # CLAUDE_HOME must be spelled out or the wired path points at nothing.
-    if [ "$CH" = "$HOME/.claude" ]; then
-        # SC2088: the tilde must survive UNEXPANDED - this string is written
-        # into settings.json for the harness to read, and the `~` form is what
-        # makes the entry dedupe against hand-written ones (see comment above).
-        # shellcheck disable=SC2088
-        hook_cmd='~/.claude/hooks/orca-start-watcher.sh'
-    else
-        hook_cmd="$CH/hooks/orca-start-watcher.sh"
-    fi
-    if ! command -v jq >/dev/null 2>&1; then
-       echo "    ! jq not found - add this to $1 under hooks.SessionStart yourself:"
-       echo "    {\"hooks\":[{\"type\":\"command\",\"command\":\"$hook_cmd\"}]}"
-       return 0
-    fi
-    entry=$(jq -nc --arg c "$hook_cmd" '{hooks:[{type:"command",command:$c}]}')
-    # Wired means an entry whose hooks[].command names the hook, whatever else
-    # it carries. Exact equality with $entry missed a hand-edited one (a
-    # `matcher`, a `timeout`) and appended a second copy on every run (#15).
-    # Both spellings count, as in unwire_claude_hook; for a custom CLAUDE_HOME
-    # they collapse to its own absolute form, so a separate default install
-    # never counts as this one.
-    wired=$(jq -nc --arg a "$hook_cmd" --arg b "$CH/hooks/orca-start-watcher.sh" '[$a,$b] | unique')
-   created=0
-   [ -f "$1" ] || { printf '{}' > "$1"; created=1; }
-   if jq -e --argjson w "$wired" \
-       'any((.hooks.SessionStart // [])[] | objects | .hooks[]? | objects | .command; IN($w[]))' "$1" >/dev/null; then
-      echo "    ok: SessionStart hook already wired"; return 0
-   fi
+  # The default install keeps the ~ form so the entry matches (and dedupes
+  # against) ones written by hand or by older installers; a custom
+  # CLAUDE_HOME must be spelled out or the wired path points at nothing.
+  if [ "$CH" = "$HOME/.claude" ]; then
+    # SC2088: the tilde must survive UNEXPANDED - this string is written
+    # into settings.json for the harness to read, and the `~` form is what
+    # makes the entry dedupe against hand-written ones (see comment above).
+    # shellcheck disable=SC2088
+    hook_cmd='~/.claude/hooks/orca-start-watcher.sh'
+  else
+    hook_cmd="$CH/hooks/orca-start-watcher.sh"
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "    ! jq not found - add this to $1 under hooks.SessionStart yourself:"
+    echo "    {\"hooks\":[{\"type\":\"command\",\"command\":\"$hook_cmd\"}]}"
+    return 0
+  fi
+  entry=$(jq -nc --arg c "$hook_cmd" '{hooks:[{type:"command",command:$c}]}')
+  # Wired means an entry whose hooks[].command names the hook, whatever else
+  # it carries. Exact equality with $entry missed a hand-edited one (a
+  # `matcher`, a `timeout`) and appended a second copy on every run (#15).
+  # Both spellings count, as in unwire_claude_hook; for a custom CLAUDE_HOME
+  # they collapse to its own absolute form, so a separate default install
+  # never counts as this one.
+  wired=$(jq -nc --arg a "$hook_cmd" --arg b "$CH/hooks/orca-start-watcher.sh" '[$a,$b] | unique')
+  created=0
+  [ -f "$1" ] || {
+    printf '{}' >"$1"
+    created=1
+  }
+  if jq -e --argjson w "$wired" \
+    'any((.hooks.SessionStart // [])[] | objects | .hooks[]? | objects | .command; IN($w[]))' "$1" >/dev/null; then
+    echo "    ok: SessionStart hook already wired"
+    return 0
+  fi
   # backup() moved it; work on a restored copy. A file we just created has
   # nothing worth backing up.
-  if [ "$created" = 0 ]; then backup "$1"; cp "$BACKUP_DST" "$1"; fi
- tmp=$(mktemp)
- jq --argjson e "$entry" '.hooks.SessionStart = ((.hooks.SessionStart // []) + [$e])' "$1" > "$tmp"
- mv "$tmp" "$1"
- echo "    wired: SessionStart hook in $1"
+  if [ "$created" = 0 ]; then
+    backup "$1"
+    cp "$BACKUP_DST" "$1"
+  fi
+  tmp=$(mktemp)
+  jq --argjson e "$entry" '.hooks.SessionStart = ((.hooks.SessionStart // []) + [$e])' "$1" >"$tmp"
+  mv "$tmp" "$1"
+  echo "    wired: SessionStart hook in $1"
 }
 
 install_agents() {
-    BIN="${ORCA_BIN:-$HOME/.local/bin}"
-    mkdir -p "$BIN" "$HOME/.config/orca"
-    install_one "$ORCA_REPO/scripts/gh-watch.sh" "$BIN/gh-watch"
-    install_one "$ORCA_REPO/agents/orca.md" "$HOME/.config/orca/AGENTS.md"
-    echo "  note: point your agent at ~/.config/orca/AGENTS.md (e.g. append it to ~/.codex/AGENTS.md)."
-    echo "  note: the SessionStart autostart hook is Claude-specific and was not installed;"
-    echo "        launch 'gh-watch <owner>/<repo>' yourself per the playbook."
+  BIN="${ORCA_BIN:-$HOME/.local/bin}"
+  mkdir -p "$BIN" "$HOME/.config/orca"
+  install_one "$ORCA_REPO/scripts/gh-watch.sh" "$BIN/gh-watch"
+  install_one "$ORCA_REPO/agents/orca.md" "$HOME/.config/orca/AGENTS.md"
+  echo "  note: point your agent at ~/.config/orca/AGENTS.md (e.g. append it to ~/.codex/AGENTS.md)."
+  echo "  note: the SessionStart autostart hook is Claude-specific and was not installed;"
+  echo "        launch 'gh-watch <owner>/<repo>' yourself per the playbook."
 }
 
 # --- uninstall ---------------------------------------------------------------
@@ -275,172 +319,180 @@ install_agents() {
 # own merits, so uninstall needs no style prompt and is idempotent.
 
 installer_made() { # $1 dst, $2 source path inside the repo
-    #   0 = the installer made this   1 = not ours   2 = cannot tell
-    if [ -L "$1" ]; then
-        # link mode: ours only if it points at <an orca checkout>/$2. The
-        # exact-$ORCA_REPO case is the normal install; the suffix case lets a
-        # piped uninstall still recognize a link made from a different
-        # checkout, without accepting a link that merely happens to sit here.
-        target=$(readlink "$1")
-        if [ -n "$ORCA_REPO" ] && [ "$target" = "$ORCA_REPO/$2" ]; then
-            return 0
-        fi
-        case "$target" in
-            # Anchored at `/`: install only ever writes ABSOLUTE links, and an
-            # unanchored `*/"$2"` would resolve a relative target like
-            # `./agents/orca.md` against the UNINSTALLER's cwd - so a user's
-            # own relative link would be "verified" by the checkout the
-            # command was merely run from, and deleted. Anchoring keeps the
-            # test on the link itself, not on where we happen to stand.
-            /*/"$2")
-                root=${target%"/$2"}
-                if [ -f "$root/agents/orca.md" ] && [ -f "$root/install.sh" ]; then
-                    return 0
-                fi
-                return 1 ;;
-        esac
-        return 1
+  #   0 = the installer made this   1 = not ours   2 = cannot tell
+  if [ -L "$1" ]; then
+    # link mode: ours only if it points at <an orca checkout>/$2. The
+    # exact-$ORCA_REPO case is the normal install; the suffix case lets a
+    # piped uninstall still recognize a link made from a different
+    # checkout, without accepting a link that merely happens to sit here.
+    target=$(readlink "$1")
+    if [ -n "$ORCA_REPO" ] && [ "$target" = "$ORCA_REPO/$2" ]; then
+      return 0
     fi
-    # copy mode: ours only if byte-identical to the source it was copied from.
-    # A file the user wrote or edited is theirs and stays.
-    [ -f "$1" ] || return 1
-    # No checkout to compare against (piped uninstall on a machine that has
-    # none). Guessing either way is worse than saying so.
-    [ -n "$ORCA_REPO" ] || return 2
-    cmp -s "$ORCA_REPO/$2" "$1" 2>/dev/null
+    case "$target" in
+      # Anchored at `/`: install only ever writes ABSOLUTE links, and an
+      # unanchored `*/"$2"` would resolve a relative target like
+      # `./agents/orca.md` against the UNINSTALLER's cwd - so a user's
+      # own relative link would be "verified" by the checkout the
+      # command was merely run from, and deleted. Anchoring keeps the
+      # test on the link itself, not on where we happen to stand.
+      /*/"$2")
+        root=${target%"/$2"}
+        if [ -f "$root/agents/orca.md" ] && [ -f "$root/install.sh" ]; then
+          return 0
+        fi
+        return 1
+        ;;
+    esac
+    return 1
+  fi
+  # copy mode: ours only if byte-identical to the source it was copied from.
+  # A file the user wrote or edited is theirs and stays.
+  [ -f "$1" ] || return 1
+  # No checkout to compare against (piped uninstall on a machine that has
+  # none). Guessing either way is worse than saying so.
+  [ -n "$ORCA_REPO" ] || return 2
+  cmp -s "$ORCA_REPO/$2" "$1" 2>/dev/null
 }
 
 remove_installed() { # $1 dst, $2 source path inside the repo
-    [ -e "$1" ] || [ -L "$1" ] || return 0
-    installer_made "$1" "$2" && verdict=0 || verdict=$?
-    case "$verdict" in
-        0)
-            # rm -f on a symlink unlinks the link, never its target.
-            if rm -f "$1" 2>/dev/null; then
-                echo "    removed: $1"
-            else
-                echo "    ! could not remove $1 - left in place"
-                LEFT=$((LEFT + 1))
-            fi ;;
-        2)
-            echo "    ! cannot verify $1 without a local orca checkout - left in place"
-            echo "      (re-run --uninstall from a checkout, e.g. git clone && ./install.sh --uninstall)"
-            LEFT=$((LEFT + 1)) ;;
-        *)
-            echo "    left alone: $1 (not what the installer creates - yours, or edited)" ;;
-    esac
+  [ -e "$1" ] || [ -L "$1" ] || return 0
+  installer_made "$1" "$2" && verdict=0 || verdict=$?
+  case "$verdict" in
+    0)
+      # rm -f on a symlink unlinks the link, never its target.
+      if rm -f "$1" 2>/dev/null; then
+        echo "    removed: $1"
+      else
+        echo "    ! could not remove $1 - left in place"
+        LEFT=$((LEFT + 1))
+      fi
+      ;;
+    2)
+      echo "    ! cannot verify $1 without a local orca checkout - left in place"
+      echo "      (re-run --uninstall from a checkout, e.g. git clone && ./install.sh --uninstall)"
+      LEFT=$((LEFT + 1))
+      ;;
+    *)
+      echo "    left alone: $1 (not what the installer creates - yours, or edited)"
+      ;;
+  esac
 }
 
 unwire_claude_hook() {
-    if [ "$CH" = "$HOME/.claude" ]; then
-        # SC2088: same as wire_claude_hook - this tilde is data written into
-        # settings.json, not a path to expand. It must match byte-for-byte
-        # what the installer wired, or the entry is not found and not removed.
-        # shellcheck disable=SC2088
-        hook_cmd='~/.claude/hooks/orca-start-watcher.sh'
-    else
-        hook_cmd="$CH/hooks/orca-start-watcher.sh"
-    fi
-    if ! command -v jq >/dev/null 2>&1; then
-        echo "    ! jq not found - remove this from $1 under hooks.SessionStart yourself:"
-        echo "    {\"hooks\":[{\"type\":\"command\",\"command\":\"$hook_cmd\"}]}"
-        return 0
-    fi
-    [ -f "$1" ] || return 0
-    # A default install drops both spellings: the ~ form it writes, and the
-    # expanded form a hand-edit may carry. A custom CLAUDE_HOME drops only its
-    # own absolute form, so tearing it down never unwires a separate default
-    # install that is still in place.
-    if [ "$CH" = "$HOME/.claude" ]; then
-        drop=$(jq -nc --arg a "$hook_cmd" --arg b "$CH/hooks/orca-start-watcher.sh" \
-            '[$a,$b] | unique | map({hooks:[{type:"command",command:.}]})')
-    else
-        drop=$(jq -nc --arg a "$hook_cmd" '[{hooks:[{type:"command",command:$a}]}]')
-    fi
-    n=$(jq --argjson d "$drop" \
-        '[(.hooks.SessionStart // [])[] | select(. as $e | $d | index($e))] | length' "$1" 2>/dev/null) \
-        || { echo "    ! $1 is not valid JSON - left as-is"; LEFT=$((LEFT + 1)); return 0; }
-    if [ "$n" = 0 ]; then
-        # Nothing of ours in there: do not rewrite the file at all, so an
-        # untouched settings.json keeps its own formatting byte-for-byte.
-        echo "    ok: no orca SessionStart entry in $1"
-    else
-        tmp=$(mktemp)
-        # Surgical: drop only entries equal to what the installer writes, then
-        # clean up the containers that leaves empty. Every other key, hook and
-        # entry is carried through by jq untouched.
-        if jq --argjson d "$drop" '
+  if [ "$CH" = "$HOME/.claude" ]; then
+    # SC2088: same as wire_claude_hook - this tilde is data written into
+    # settings.json, not a path to expand. It must match byte-for-byte
+    # what the installer wired, or the entry is not found and not removed.
+    # shellcheck disable=SC2088
+    hook_cmd='~/.claude/hooks/orca-start-watcher.sh'
+  else
+    hook_cmd="$CH/hooks/orca-start-watcher.sh"
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "    ! jq not found - remove this from $1 under hooks.SessionStart yourself:"
+    echo "    {\"hooks\":[{\"type\":\"command\",\"command\":\"$hook_cmd\"}]}"
+    return 0
+  fi
+  [ -f "$1" ] || return 0
+  # A default install drops both spellings: the ~ form it writes, and the
+  # expanded form a hand-edit may carry. A custom CLAUDE_HOME drops only its
+  # own absolute form, so tearing it down never unwires a separate default
+  # install that is still in place.
+  if [ "$CH" = "$HOME/.claude" ]; then
+    drop=$(jq -nc --arg a "$hook_cmd" --arg b "$CH/hooks/orca-start-watcher.sh" \
+      '[$a,$b] | unique | map({hooks:[{type:"command",command:.}]})')
+  else
+    drop=$(jq -nc --arg a "$hook_cmd" '[{hooks:[{type:"command",command:$a}]}]')
+  fi
+  n=$(jq --argjson d "$drop" \
+    '[(.hooks.SessionStart // [])[] | select(. as $e | $d | index($e))] | length' "$1" 2>/dev/null) ||
+    {
+      echo "    ! $1 is not valid JSON - left as-is"
+      LEFT=$((LEFT + 1))
+      return 0
+    }
+  if [ "$n" = 0 ]; then
+    # Nothing of ours in there: do not rewrite the file at all, so an
+    # untouched settings.json keeps its own formatting byte-for-byte.
+    echo "    ok: no orca SessionStart entry in $1"
+  else
+    tmp=$(mktemp)
+    # Surgical: drop only entries equal to what the installer writes, then
+    # clean up the containers that leaves empty. Every other key, hook and
+    # entry is carried through by jq untouched.
+    if jq --argjson d "$drop" '
               .hooks.SessionStart |= map(select(. as $e | $d | index($e) | not))
               | if (.hooks.SessionStart | length) == 0 then del(.hooks.SessionStart) else . end
               | if (.hooks | length) == 0 then del(.hooks) else . end
-            ' "$1" > "$tmp" && mv "$tmp" "$1"; then
-            echo "    unwired: SessionStart hook in $1"
-        else
-            rm -f "$tmp"
-            echo "    ! could not rewrite $1 - left as-is"
-            LEFT=$((LEFT + 1))
-            return 0
-        fi
+            ' "$1" >"$tmp" && mv "$tmp" "$1"; then
+      echo "    unwired: SessionStart hook in $1"
+    else
+      rm -f "$tmp"
+      echo "    ! could not rewrite $1 - left as-is"
+      LEFT=$((LEFT + 1))
+      return 0
     fi
-    # An entry the user merged our command INTO is not one we wrote, so it is
-    # not removed - but say so rather than leaving a silent leftover.
-    if jq -e '[(.hooks.SessionStart // [])[] | tostring
+  fi
+  # An entry the user merged our command INTO is not one we wrote, so it is
+  # not removed - but say so rather than leaving a silent leftover.
+  if jq -e '[(.hooks.SessionStart // [])[] | tostring
                | select(contains("orca-start-watcher"))] | length > 0' "$1" >/dev/null 2>&1; then
-        echo "    note: another SessionStart entry in $1 still references orca-start-watcher.sh; left as-is"
-    fi
+    echo "    note: another SessionStart entry in $1 still references orca-start-watcher.sh; left as-is"
+  fi
 }
 
 uninstall_claude() {
-    CH="${CLAUDE_HOME:-$HOME/.claude}"
-    # as in install_claude: `/x/` and `/x//` name the same entry as `/x`
-    CH="${CH%"${CH##*[!/]}"}"
-    remove_installed "$CH/agents/orca.md"                agents/orca.md
-    remove_installed "$CH/hooks/orca-start-watcher.sh"   hooks/orca-start-watcher.sh
-    remove_installed "$CH/scripts/gh-watch.sh"           scripts/gh-watch.sh
-    unwire_claude_hook "$CH/settings.json"
+  CH="${CLAUDE_HOME:-$HOME/.claude}"
+  # as in install_claude: `/x/` and `/x//` name the same entry as `/x`
+  CH="${CH%"${CH##*[!/]}"}"
+  remove_installed "$CH/agents/orca.md" agents/orca.md
+  remove_installed "$CH/hooks/orca-start-watcher.sh" hooks/orca-start-watcher.sh
+  remove_installed "$CH/scripts/gh-watch.sh" scripts/gh-watch.sh
+  unwire_claude_hook "$CH/settings.json"
 }
 
 uninstall_agents() {
-    BIN="${ORCA_BIN:-$HOME/.local/bin}"
-    remove_installed "$BIN/gh-watch"                  scripts/gh-watch.sh
-    remove_installed "$HOME/.config/orca/AGENTS.md"   agents/orca.md
-    # Only this directory is orca's own; ~/.claude/* and ~/.local/bin belong to
-    # the user. rmdir (never rm -r) so a non-empty one is left standing.
-    rmdir "$HOME/.config/orca" 2>/dev/null || true
+  BIN="${ORCA_BIN:-$HOME/.local/bin}"
+  remove_installed "$BIN/gh-watch" scripts/gh-watch.sh
+  remove_installed "$HOME/.config/orca/AGENTS.md" agents/orca.md
+  # Only this directory is orca's own; ~/.claude/* and ~/.local/bin belong to
+  # the user. rmdir (never rm -r) so a non-empty one is left standing.
+  rmdir "$HOME/.config/orca" 2>/dev/null || true
 }
 
 uninstall() {
-    # $HOME was normalized and vetted at the top, before any path was built.
-    #
-    # BEST EFFORT, not fail-fast: `set -eu` would abort the whole sweep on the
-    # first failed `rm` - leaving some files installed, the hook still wired,
-    # and no summary - and the user would then have to re-run once per
-    # failure to discover the rest. A teardown is exactly where partial
-    # failure is normal (read-only mounts, permissions, files already moved),
-    # so every step runs, everything left behind is named as it happens, and
-    # the count is reported at the end. The exit status still tells the truth:
-    # non-zero when anything remains, so a script can detect it, and the run
-    # is idempotent so a re-run after fixing the cause finishes the job.
-    LEFT=0
-    if [ -n "$ORCA_REPO" ]; then
-        echo "Uninstalling orca (comparing against $ORCA_REPO)"
-    else
-        echo "Uninstalling orca (no local checkout to compare against)"
-    fi
-    echo "  claude style:"
-    uninstall_claude
-    echo "  agents style:"
-    uninstall_agents
-    if [ -d "$HOME/.orca-backups" ]; then
-        echo "  note: files the installer replaced are still in $HOME/.orca-backups/"
-        echo "        (untouched by uninstall - list the runs with --restore, put one"
-        echo "        back with --restore <run>)."
-    fi
-    if [ "$LEFT" -gt 0 ]; then
-        echo "done, but $LEFT item(s) are still installed - see the ! lines above."
-        return 1
-    fi
-    echo "done."
+  # $HOME was normalized and vetted at the top, before any path was built.
+  #
+  # BEST EFFORT, not fail-fast: `set -eu` would abort the whole sweep on the
+  # first failed `rm` - leaving some files installed, the hook still wired,
+  # and no summary - and the user would then have to re-run once per
+  # failure to discover the rest. A teardown is exactly where partial
+  # failure is normal (read-only mounts, permissions, files already moved),
+  # so every step runs, everything left behind is named as it happens, and
+  # the count is reported at the end. The exit status still tells the truth:
+  # non-zero when anything remains, so a script can detect it, and the run
+  # is idempotent so a re-run after fixing the cause finishes the job.
+  LEFT=0
+  if [ -n "$ORCA_REPO" ]; then
+    echo "Uninstalling orca (comparing against $ORCA_REPO)"
+  else
+    echo "Uninstalling orca (no local checkout to compare against)"
+  fi
+  echo "  claude style:"
+  uninstall_claude
+  echo "  agents style:"
+  uninstall_agents
+  if [ -d "$HOME/.orca-backups" ]; then
+    echo "  note: files the installer replaced are still in $HOME/.orca-backups/"
+    echo "        (untouched by uninstall - list the runs with --restore, put one"
+    echo "        back with --restore <run>)."
+  fi
+  if [ "$LEFT" -gt 0 ]; then
+    echo "done, but $LEFT item(s) are still installed - see the ! lines above."
+    return 1
+  fi
+  echo "done."
 }
 
 # --- restore -----------------------------------------------------------------
@@ -454,121 +506,122 @@ uninstall() {
 TAB=$(printf '\t')
 
 list_runs() {
-    root="$HOME/.orca-backups"
-    if [ ! -d "$root" ]; then
-        echo "no backups: $root/ does not exist"
-        return 0
+  root="$HOME/.orca-backups"
+  if [ ! -d "$root" ]; then
+    echo "no backups: $root/ does not exist"
+    return 0
+  fi
+  echo "backup runs in $root/ (put one back with --restore <run>):"
+  found=0
+  for run in "$root"/*/; do
+    [ -d "$run" ] || continue # the unmatched glob itself
+    run=${run%/}
+    found=1
+    echo "  ${run##*/}"
+    if [ -f "$run/MANIFEST" ]; then
+      while IFS="$TAB" read -r name origin; do
+        echo "    $name -> $origin"
+      done <"$run/MANIFEST"
+    else
+      echo "    no manifest: restore by hand from $run/"
     fi
-    echo "backup runs in $root/ (put one back with --restore <run>):"
-    found=0
-    for run in "$root"/*/; do
-        [ -d "$run" ] || continue   # the unmatched glob itself
-        run=${run%/}
-        found=1
-        echo "  ${run##*/}"
-        if [ -f "$run/MANIFEST" ]; then
-            while IFS="$TAB" read -r name origin; do
-                echo "    $name -> $origin"
-            done < "$run/MANIFEST"
-        else
-            echo "    no manifest: restore by hand from $run/"
-        fi
-    done
-    [ "$found" = 1 ] || echo "  (none)"
+  done
+  [ "$found" = 1 ] || echo "  (none)"
 }
 
 restore() {
-    # $HOME was normalized and vetted at the top, as for uninstall. Best
-    # effort for the same reason: every entry is attempted, what could not
-    # be put back is named as it happens, and the exit status reports it.
-    if [ -z "$RESTORE_RUN" ]; then
-        list_runs
-        return 0
+  # $HOME was normalized and vetted at the top, as for uninstall. Best
+  # effort for the same reason: every entry is attempted, what could not
+  # be put back is named as it happens, and the exit status reports it.
+  if [ -z "$RESTORE_RUN" ]; then
+    list_runs
+    return 0
+  fi
+  # A directory NAME, never a path: `..`, `x/..` or a leading `/` would
+  # reach a MANIFEST outside ~/.orca-backups/. list_runs never shows a
+  # dotted name (its glob skips them), so nothing valid is refused.
+  case "$RESTORE_RUN" in
+    */* | .*)
+      echo "invalid run name: $RESTORE_RUN (--restore with no argument lists them)" >&2
+      return 1
+      ;;
+  esac
+  run="$HOME/.orca-backups/$RESTORE_RUN"
+  if [ ! -d "$run" ]; then
+    echo "unknown run: $RESTORE_RUN (--restore with no argument lists them)" >&2
+    return 1
+  fi
+  if [ ! -f "$run/MANIFEST" ]; then
+    echo "no manifest in $run/ - restore by hand" >&2
+    return 1
+  fi
+  echo "Restoring from $run/"
+  LEFT=0
+  while IFS="$TAB" read -r name origin; do
+    # Fields are checked, not trusted: a name with `/` (or a dotted one)
+    # would read outside the run, and a relative origin would land
+    # wherever --restore happens to be run from. An origin outside $HOME
+    # is fine - a custom CLAUDE_HOME or ORCA_BIN lives there.
+    ok=1
+    case "$name" in "" | */* | .*) ok=0 ;; esac
+    case "$origin" in /*) ;; *) ok=0 ;; esac
+    if [ "$ok" = 0 ]; then
+      echo "    ! bad manifest line, not restored: $name -> $origin"
+      LEFT=$((LEFT + 1))
+      continue
     fi
-    # A directory NAME, never a path: `..`, `x/..` or a leading `/` would
-    # reach a MANIFEST outside ~/.orca-backups/. list_runs never shows a
-    # dotted name (its glob skips them), so nothing valid is refused.
-    case "$RESTORE_RUN" in
-        */*|.*)
-            echo "invalid run name: $RESTORE_RUN (--restore with no argument lists them)" >&2
-            return 1 ;;
-    esac
-    run="$HOME/.orca-backups/$RESTORE_RUN"
-    if [ ! -d "$run" ]; then
-        echo "unknown run: $RESTORE_RUN (--restore with no argument lists them)" >&2
-        return 1
+    # The whole pre-install settings.json: --uninstall already removed the
+    # hook entry surgically, and anything else in here is a manual merge -
+    # a blind copy would revert every setting changed since.
+    if [ "${origin##*/}" = settings.json ]; then
+      echo "    not restored: $run/$name"
+      echo "      (settings.json is never restored: --uninstall removes the hook"
+      echo "       entry it wired; merge anything else from that copy by hand)"
+      continue
     fi
-    if [ ! -f "$run/MANIFEST" ]; then
-        echo "no manifest in $run/ - restore by hand" >&2
-        return 1
+    if [ -e "$origin" ] || [ -L "$origin" ]; then
+      echo "    skipped: exists - $origin"
+      continue
     fi
-    echo "Restoring from $run/"
-    LEFT=0
-    while IFS="$TAB" read -r name origin; do
-        # Fields are checked, not trusted: a name with `/` (or a dotted one)
-        # would read outside the run, and a relative origin would land
-        # wherever --restore happens to be run from. An origin outside $HOME
-        # is fine - a custom CLAUDE_HOME or ORCA_BIN lives there.
-        ok=1
-        case "$name" in ""|*/*|.*) ok=0 ;; esac
-        case "$origin" in /*) ;; *) ok=0 ;; esac
-        if [ "$ok" = 0 ]; then
-            echo "    ! bad manifest line, not restored: $name -> $origin"
-            LEFT=$((LEFT + 1))
-            continue
-        fi
-        # The whole pre-install settings.json: --uninstall already removed the
-        # hook entry surgically, and anything else in here is a manual merge -
-        # a blind copy would revert every setting changed since.
-        if [ "${origin##*/}" = settings.json ]; then
-            echo "    not restored: $run/$name"
-            echo "      (settings.json is never restored: --uninstall removes the hook"
-            echo "       entry it wired; merge anything else from that copy by hand)"
-            continue
-        fi
-        if [ -e "$origin" ] || [ -L "$origin" ]; then
-            echo "    skipped: exists - $origin"
-            continue
-        fi
-        # -RP: a backed-up symlink goes back as a symlink and a file as a
-        # file, the inverse of the mv that moved it aside. The parent may be
-        # gone: uninstall rmdirs an emptied ~/.config/orca.
-        if mkdir -p "$(dirname -- "$origin")" && cp -RP "$run/$name" "$origin"; then
-            echo "    restored: $origin"
-        else
-            echo "    ! could not restore $origin"
-            LEFT=$((LEFT + 1))
-        fi
-    done < "$run/MANIFEST"
-    if [ "$LEFT" -gt 0 ]; then
-        echo "done, but $LEFT item(s) could not be restored - see the ! lines above."
-        return 1
+    # -RP: a backed-up symlink goes back as a symlink and a file as a
+    # file, the inverse of the mv that moved it aside. The parent may be
+    # gone: uninstall rmdirs an emptied ~/.config/orca.
+    if mkdir -p "$(dirname -- "$origin")" && cp -RP "$run/$name" "$origin"; then
+      echo "    restored: $origin"
+    else
+      echo "    ! could not restore $origin"
+      LEFT=$((LEFT + 1))
     fi
-    echo "done."
+  done <"$run/MANIFEST"
+  if [ "$LEFT" -gt 0 ]; then
+    echo "done, but $LEFT item(s) could not be restored - see the ! lines above."
+    return 1
+  fi
+  echo "done."
 }
 
 if [ "$ACTION" = uninstall ]; then
-    # `|| exit 1` and not a bare call: `set -e` would abort on the non-zero
-    # return before the exit status could be handed back deliberately.
-    uninstall || exit 1
-    exit 0
+  # `|| exit 1` and not a bare call: `set -e` would abort on the non-zero
+  # return before the exit status could be handed back deliberately.
+  uninstall || exit 1
+  exit 0
 fi
 if [ "$ACTION" = restore ]; then
-    restore || exit 1
-    exit 0
+  restore || exit 1
+  exit 0
 fi
 
 resolve_style
 echo "Installing orca ($STYLE style) from $ORCA_REPO"
 case "$STYLE" in
-   claude) install_claude ;;
-   agents) install_agents ;;
+  claude) install_claude ;;
+  agents) install_agents ;;
 esac
 # Plain `if`, not `[ ... ] && echo`: under set -e a false test in an && list
 # does not abort, but as the LAST statement it is the exit status - 1, with
 # no diagnostic - so the form must not depend on what follows it (#17).
 if [ -n "$BACKUP_DIR" ]; then
-    echo "replaced files moved to $BACKUP_DIR (after --uninstall, --restore $TS puts them back)"
+  echo "replaced files moved to $BACKUP_DIR (after --uninstall, --restore $TS puts them back)"
 fi
 # The checkout is the version record: the tag HEAD sits on (a pinned
 # install), else the commit (a development checkout). Only the checkout's
@@ -576,10 +629,10 @@ fi
 # would otherwise have git walk up and report that repository's version.
 version=
 if [ -e "$ORCA_REPO/.git" ]; then
-    version=$(git -C "$ORCA_REPO" describe --tags --exact-match 2>/dev/null \
-        || git -C "$ORCA_REPO" rev-parse --short HEAD 2>/dev/null) || version=
+  version=$(git -C "$ORCA_REPO" describe --tags --exact-match 2>/dev/null ||
+    git -C "$ORCA_REPO" rev-parse --short HEAD 2>/dev/null) || version=
 fi
 if [ -n "$version" ]; then
-    echo "installed orca $version"
+  echo "installed orca $version"
 fi
 echo "done."

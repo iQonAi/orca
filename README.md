@@ -369,6 +369,9 @@ The suite is hermetic: a stub `gh` replaces the network and
 `GH_WATCH_STATE_DIR` redirects pidfiles to a temp dir, so a real watcher on
 the machine is neither seen nor disturbed.
 
+The shell scripts are formatted with `shfmt` v3.14.0 (`shfmt -i 2 -ci`), and
+CI fails on any diff from that style.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

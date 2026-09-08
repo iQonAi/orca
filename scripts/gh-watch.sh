@@ -46,13 +46,25 @@ set -u
 
 mode=watch
 case "${1:-}" in
-  --status)   mode=status;   shift ;;
-  --takeover) mode=takeover; shift ;;
-  --*) echo "usage: gh-watch.sh [--status|--takeover] [owner/repo]"; exit 1 ;;
+  --status)
+    mode=status
+    shift
+    ;;
+  --takeover)
+    mode=takeover
+    shift
+    ;;
+  --*)
+    echo "usage: gh-watch.sh [--status|--takeover] [owner/repo]"
+    exit 1
+    ;;
 esac
 
 repo="${1:-$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)}"
-[ -z "$repo" ] && { echo "usage: gh-watch.sh <owner/repo> (none given, none detected from cwd)"; exit 1; }
+[ -z "$repo" ] && {
+  echo "usage: gh-watch.sh <owner/repo> (none given, none detected from cwd)"
+  exit 1
+}
 
 state_dir="${GH_WATCH_STATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/gh-watch-$(id -u)}"
 if [ "$mode" != status ]; then
@@ -60,7 +72,9 @@ if [ "$mode" != status ]; then
   # so its exit status alone is not a guard — check the properties we need.
   mkdir -p "$state_dir" 2>/dev/null
   { [ -d "$state_dir" ] && [ -w "$state_dir" ] && [ -x "$state_dir" ]; } || {
-    echo "watcher state dir $state_dir is not a writable directory"; exit 1; }
+    echo "watcher state dir $state_dir is not a writable directory"
+    exit 1
+  }
 fi
 pidfile="$state_dir/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_').pid"
 
@@ -74,10 +88,10 @@ pidfile="$state_dir/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_').pid"
 # `-ww` is required — BSD `ps` truncates the command column to terminal width.
 live_watcher() {
   [ -n "${1:-}" ] || return 1
-  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  case "$1" in '' | *[!0-9]*) return 1 ;; esac
   kill -0 "$1" 2>/dev/null || return 1
-  ps -ww -o args= -p "$1" 2>/dev/null \
-    | grep -qE "gh-watch\.sh([[:space:]]+$repo)?[[:space:]]*$"
+  ps -ww -o args= -p "$1" 2>/dev/null |
+    grep -qE "gh-watch\.sh([[:space:]]+$repo)?[[:space:]]*$"
 }
 
 if [ "$mode" = status ]; then
@@ -95,7 +109,10 @@ if [ "$mode" = takeover ]; then
   if live_watcher "$incumbent"; then
     echo "taking over from watcher pid $incumbent for $repo"
     kill -TERM "$incumbent" 2>/dev/null
-    for _ in $(seq 1 20); do live_watcher "$incumbent" || break; sleep 0.5; done
+    for _ in $(seq 1 20); do
+      live_watcher "$incumbent" || break
+      sleep 0.5
+    done
     if live_watcher "$incumbent"; then
       echo "watcher pid $incumbent for $repo did not exit; not starting a second one"
       exit 3
@@ -130,7 +147,10 @@ fi
 # the lock exists to stop, so no impatience rule is allowed here.
 got_lock=0
 for _ in $(seq 1 50); do
-  if mkdir "$lockdir" 2>/dev/null; then got_lock=1; break; fi
+  if mkdir "$lockdir" 2>/dev/null; then
+    got_lock=1
+    break
+  fi
   # Someone else holds the lock. If they have meanwhile installed themselves
   # as a live watcher, we are simply redundant and can answer without waiting
   # for the lock at all — this drains a burst of launches immediately instead
@@ -152,7 +172,7 @@ if [ "$got_lock" != 1 ]; then
   echo "could not take the watcher lock $lockdir for $repo"
   exit 1
 fi
-( printf '%s\n' "$$" >"$lockdir/holder" ) 2>/dev/null
+(printf '%s\n' "$$" >"$lockdir/holder") 2>/dev/null
 incumbent="$(cat "$pidfile" 2>/dev/null)"
 if live_watcher "$incumbent"; then
   incumbent_live=1
@@ -162,7 +182,7 @@ else
   # unwritable pidfile path (e.g. a directory) must fail quietly here and be
   # reported by the exit-code branch below, not leak a raw shell error.
   rm -f "$pidfile" 2>/dev/null
-  ( printf '%s\n' "$$" >"$pidfile" ) 2>/dev/null && owned=1
+  (printf '%s\n' "$$" >"$pidfile") 2>/dev/null && owned=1
 fi
 # Release only a lock we still hold, so a lock broken out from under us (we
 # were wrongly judged dead) is never deleted while its new holder is inside.
@@ -206,10 +226,14 @@ snapshot() {
     --jq '[.[] | {n: .number, u: .updated_at, l: [.labels[].name]}]' 2>/dev/null
 }
 base=$(snapshot) || base=""
-[ -z "$base" ] && { echo "baseline fetch failed for $repo"; exit 1; }
+[ -z "$base" ] && {
+  echo "baseline fetch failed for $repo"
+  exit 1
+}
 echo "watching $repo (baseline captured $(date +%H:%M:%S))"
 for _ in $(seq 1 110); do
-  sleep 30 & sleep_pid=$!
+  sleep 30 &
+  sleep_pid=$!
   wait "$sleep_pid" 2>/dev/null
   sleep_pid=""
   cur=$(snapshot) || continue
