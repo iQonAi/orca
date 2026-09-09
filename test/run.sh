@@ -5,10 +5,13 @@
 # Covers:
 #   hooks/orca-start-watcher.sh  (SessionStart directive injection)
 #   scripts/gh-watch.sh          (single-instance-per-repo watcher)
+#   install.sh                   (both styles, --uninstall, --restore)
+#   bin/orca                     (the launcher: preflight checks, identity)
 #
-# Hermetic: temp git repos stand in for workspaces, a stub `gh` on PATH
-# replaces the network, and GH_WATCH_STATE_DIR redirects pidfiles into a
-# temp dir so a real watcher on this machine is neither seen nor disturbed.
+# Hermetic: temp git repos stand in for workspaces, a stub `gh` (and, for the
+# launcher, a stub `claude`) on PATH replaces the network, and
+# GH_WATCH_STATE_DIR redirects pidfiles into a temp dir so a real watcher on
+# this machine is neither seen nor disturbed.
 #
 # Usage:
 #   bash test/run.sh
@@ -381,6 +384,7 @@ unset GH_WATCH_STATE_DIR
 # same in an interactive shell and in CI.
 
 INSTALL_SH="$REPO_ROOT/install.sh"
+LAUNCHER="$REPO_ROOT/bin/orca"
 INST_TMP="$(mktemp -d)"
 trap 'reap_live_watchers; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/null; rm -rf "$WATCHER_TMP" "$GH_TMP" "$INST_TMP"' EXIT
 
@@ -642,11 +646,12 @@ wassert 'install: CLAUDE_HOME with two trailing slashes leaves the hand-wired se
 # (signing, hooks) out of the fixture. file:// keeps every clone offline.
 ORIGIN="$INST_TMP/origin"
 if command -v git >/dev/null 2>&1; then
-  mkdir -p "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts"
+  mkdir -p "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts" "$ORIGIN/bin"
   cp "$INSTALL_SH" "$ORIGIN/install.sh"
   cp "$REPO_ROOT/agents/orca.md" "$ORIGIN/agents/orca.md"
   cp "$HOOKS_DIR/orca-start-watcher.sh" "$ORIGIN/hooks/orca-start-watcher.sh"
   cp "$WATCH_SCRIPT" "$ORIGIN/scripts/gh-watch.sh"
+  cp "$LAUNCHER" "$ORIGIN/bin/orca"
   (
     export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
       GIT_AUTHOR_NAME=orca-test GIT_AUTHOR_EMAIL=orca-test@example.invalid \
@@ -862,7 +867,7 @@ if command -v git >/dev/null 2>&1; then
   # The tagged origin above stands in for the enclosing repository.
   TARBALL="$ORIGIN/tarball"
   mkdir -p "$TARBALL"
-  cp -R "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts" "$ORIGIN/install.sh" "$TARBALL/"
+  cp -R "$ORIGIN/agents" "$ORIGIN/hooks" "$ORIGIN/scripts" "$ORIGIN/bin" "$ORIGIN/install.sh" "$TARBALL/"
   PIN9="$INST_TMP/tarball-home"
   mkdir -p "$PIN9"
   OUTV9="$(ORCA_STYLE=claude HOME="$PIN9" sh "$TARBALL/install.sh" </dev/null 2>&1)"
@@ -1143,11 +1148,12 @@ wassert 'uninstall: an absolute link into a NON-checkout root is not ours' \
 # different copy than the install came from), so it must not need an exact
 # $ORCA_REPO match. A minimal second checkout stands in for it.
 REPO2="$INST_TMP/repo2"
-mkdir -p "$REPO2/agents" "$REPO2/hooks" "$REPO2/scripts"
+mkdir -p "$REPO2/agents" "$REPO2/hooks" "$REPO2/scripts" "$REPO2/bin"
 cp "$INSTALL_SH" "$REPO2/install.sh"
 cp "$REPO_ROOT/agents/orca.md" "$REPO2/agents/orca.md"
 cp "$HOOKS_DIR/orca-start-watcher.sh" "$REPO2/hooks/orca-start-watcher.sh"
 cp "$WATCH_SCRIPT" "$REPO2/scripts/gh-watch.sh"
+cp "$LAUNCHER" "$REPO2/bin/orca"
 IH16="$INST_TMP/h16"
 mkdir -p "$IH16"
 ORCA_STYLE=claude HOME="$IH16" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
@@ -1623,6 +1629,465 @@ else
   wassert 'restore: reports how much could not be restored' test "$R20_SUMMARY" = 1
 fi
 chmod u+rwx "$IM10/.claude/agents"
+
+# ---------------------------------------------------------------------------
+# bin/orca — the launcher: preflight checks, identity export, single instance
+#
+# Hermetic. PATH is a shim directory holding only the system tools the
+# launcher uses plus a stub `gh` and a stub `claude`, so a tool can be made
+# "missing" whatever the machine has. The stub gh answers `api user` and the
+# collaborator-permission call from canned JSON (through real jq, as gh's
+# --jq would) and accepts ONE token, so "GH_TOKEN was set from the file" is
+# asserted, not assumed. The stub claude prints the argv and the identity it
+# was exec'd with, and can hold the session open. HOME, XDG_CONFIG_HOME and
+# CLAUDE_HOME are temp dirs; the install the checks look at is made by
+# install.sh itself, so the check sees exactly what a user's would.
+
+L_TMP="$(mktemp -d)"
+LIVE_ORCAS=()
+reap_live_orcas() {
+  local p c
+  for p in ${LIVE_ORCAS[@]+"${LIVE_ORCAS[@]}"}; do
+    for c in $(pgrep -P "$p" 2>/dev/null); do kill -9 "$c" 2>/dev/null; done
+    kill -9 "$p" 2>/dev/null
+  done
+  LIVE_ORCAS=()
+}
+trap 'reap_live_watchers; reap_live_orcas; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/null; rm -rf "$WATCHER_TMP" "$GH_TMP" "$INST_TMP" "$L_TMP"' EXIT
+
+# the shim PATH: the system tools the launcher and the stubs use, nothing else
+L_SYS="$L_TMP/sys"
+mkdir -p "$L_SYS"
+L_SHIM_OK=1
+for t in sh bash git jq ps grep tr stat cat readlink mkdir rm sleep; do
+  p="$(command -v "$t")" && ln -s "$p" "$L_SYS/$t" || L_SHIM_OK=0
+done
+L_STUBS="$L_TMP/stubs"
+mkdir -p "$L_STUBS"
+cat >"$L_STUBS/gh" <<'STUB'
+#!/usr/bin/env bash
+# canned gh. Accepts one token (ORCA_STUB_TOKEN) as GH_TOKEN, else 401.
+# Answers `api user` and `api repos/<o>/<r>/collaborators/orca-bot/permission`
+# (the permission from ORCA_STUB_PERM, default admin), applying --jq with real
+# jq. ORCA_STUB_CALLS names a file each call's arguments are appended to.
+jq_expr=
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --jq)
+      jq_expr="$2"
+      shift
+      ;;
+    *) args+=("$1") ;;
+  esac
+  shift
+done
+[ -n "${ORCA_STUB_CALLS:-}" ] && printf '%s\n' "${args[*]}" >>"$ORCA_STUB_CALLS"
+if [ "${GH_TOKEN-}" != "${ORCA_STUB_TOKEN-}" ]; then
+  echo "gh: HTTP 401: Bad credentials (https://api.github.com/${args[1]-})" >&2
+  exit 1
+fi
+case "${args[0]-} ${args[1]-}" in
+  'api user') body='{"login":"orca-bot","id":424242}' ;;
+  api\ repos/*/collaborators/orca-bot/permission) body="{\"permission\":\"${ORCA_STUB_PERM:-admin}\"}" ;;
+  *)
+    echo "stub gh: unexpected call: ${args[*]}" >&2
+    exit 1
+    ;;
+esac
+if [ -n "$jq_expr" ]; then printf '%s' "$body" | jq -r "$jq_expr"; else printf '%s\n' "$body"; fi
+STUB
+cat >"$L_STUBS/claude" <<'STUB'
+#!/usr/bin/env bash
+# stands in for claude: prints what it was exec'd with, then exits - or, with
+# ORCA_STUB_HOLD set, stays alive that many seconds (TERM ends it) so the
+# session record can be observed while "orca" runs.
+printf 'stub claude argv:'
+printf ' [%s]' "$@"
+printf '\n'
+for v in GH_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL; do
+  printf '%s=%s\n' "$v" "${!v-unset}"
+done
+if [ -n "${ORCA_STUB_HOLD:-}" ]; then
+  trap 'kill "$sp" 2>/dev/null; exit 0' TERM INT
+  sleep "$ORCA_STUB_HOLD" &
+  sp=$!
+  wait "$sp"
+fi
+exit 0
+STUB
+chmod +x "$L_STUBS/gh" "$L_STUBS/claude"
+L_PATH="$L_STUBS:$L_SYS"
+# the same PATH with no claude on it
+L_NOCLAUDE="$L_TMP/noclaude"
+mkdir -p "$L_NOCLAUDE"
+ln -s "$L_STUBS/gh" "$L_NOCLAUDE/gh"
+
+# a HOME with a claude-style install made by install.sh (launcher included,
+# in ORCA_BIN) and a 0600 token file
+L_HOME="$L_TMP/home"
+L_OBIN="$L_TMP/obin"
+mkdir -p "$L_HOME/.config/orca"
+L_TOKEN="$L_HOME/.config/orca/token"
+printf 'ghp_stubtoken\n' >"$L_TOKEN"
+chmod 600 "$L_TOKEN"
+ORCA_STYLE=claude HOME="$L_HOME" ORCA_BIN="$L_OBIN" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+L_RECORD="$L_HOME/.config/orca/sessions/octocat_hello-world"
+
+# run_orca <cwd> <argv...> — the launcher under the shim PATH with the temp
+# HOME and identity. ORCA_ENV (an array of VAR=value) adds or overrides
+# variables for one run. Output and exit code land in ORCA_OUT / ORCA_RC.
+ORCA_ENV=()
+run_orca() {
+  local cwd="$1"
+  shift
+  ORCA_OUT="$(cd "$cwd" && env -i HOME="$L_HOME" XDG_CONFIG_HOME="$L_HOME/.config" ORCA_BIN="$L_OBIN" \
+    PATH="$L_PATH" ORCA_STUB_TOKEN=ghp_stubtoken ${ORCA_ENV[@]+"${ORCA_ENV[@]}"} \
+    sh "$LAUNCHER" "$@" 2>&1)"
+  ORCA_RC=$?
+  ORCA_ENV=()
+}
+# orca_said <desc> <substr> / orca_not_said <desc> <substr> — ORCA_OUT does
+# (not) contain the literal substring
+orca_said() {
+  if [[ "$ORCA_OUT" == *"$2"* ]]; then
+    printf 'ok:   %s\n' "$1"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL: %s\n      output missing: %s\n      got: %s\n' "$1" "$2" "$ORCA_OUT" >&2
+    fail=$((fail + 1))
+  fi
+}
+orca_not_said() {
+  if [[ "$ORCA_OUT" != *"$2"* ]]; then
+    printf 'ok:   %s\n' "$1"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL: %s\n      output contains: %s\n      got: %s\n' "$1" "$2" "$ORCA_OUT" >&2
+    fail=$((fail + 1))
+  fi
+}
+# tmode <path> — permission bits in octal, GNU stat then BSD stat
+tmode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+# wait_record_gone — the janitor removes the record within about a second of
+# claude's exit; allow five. Called after every launch, so the next case never
+# sees the previous launch's record.
+wait_record_gone() {
+  local _i
+  for _i in $(seq 1 20); do
+    [ -e "$L_RECORD" ] || return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+if [[ "$L_SHIM_OK" == 1 ]]; then
+  # every check passes: exit 0, one ok per check, the login named, nothing
+  # launched, nothing written, and the token itself never on the screen
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: --check with everything in place exits 0' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: --check names the login it runs as' 'ok: running as orca-bot'
+  orca_said 'launcher: --check reports the tools' 'ok: tools: gh, git, jq, claude on PATH'
+  orca_said 'launcher: --check reports the token file and its mode' "ok: token: $L_TOKEN (mode 0600)"
+  orca_said 'launcher: --check resolves the repo from an SSH origin and reports the permission' \
+    'ok: repo: octocat/hello-world (orca-bot has admin access)'
+  orca_said 'launcher: --check reports the installed files' \
+    "ok: install: claude style; playbook, hook and watcher in place under $L_HOME/.claude"
+  orca_said 'launcher: --check reports the wired hook' "ok: install: SessionStart hook wired in $L_HOME/.claude/settings.json"
+  orca_said 'launcher: --check reports no other instance' 'ok: instance: no other orca running for octocat/hello-world'
+  orca_said 'launcher: --check says all checks passed' 'all checks passed'
+  orca_not_said 'launcher: --check launches nothing' 'stub claude'
+  wassert 'launcher: --check writes no session record' test ! -e "$L_RECORD"
+  orca_not_said 'launcher: --check never prints the token' 'ghp_stubtoken'
+
+  # an HTTPS origin normalizes to the same owner/repo; --repo overrides detection
+  run_orca "$REPO_HTTPS" --check
+  wassert 'launcher: --check from an HTTPS origin exits 0' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: an HTTPS origin resolves to owner/repo' 'ok: repo: octocat/hello-world ('
+  run_orca "$REPO_SSH" --check --repo octocat/elsewhere
+  wassert 'launcher: --repo exits 0' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: --repo overrides the detected repo' 'ok: repo: octocat/elsewhere (orca-bot has admin access)'
+  orca_said 'launcher: --repo is the repo the instance check uses' 'ok: instance: no other orca running for octocat/elsewhere'
+
+  # 1. tools: a missing one is named, and every other check still runs
+  ORCA_ENV=(PATH="$L_NOCLAUDE:$L_SYS")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a missing tool fails --check (exit 1)' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a missing tool is named' 'fail: tools: claude not on PATH'
+  orca_said 'launcher: the other checks still run after a missing tool' 'ok: running as orca-bot'
+  orca_said 'launcher: the failure count is reported' '1 check(s) failed'
+
+  # 2. identity: the token file must exist, be non-empty and be mode 0600 -
+  # a readable one is refused UNREAD (gh is never called with it) - and gh
+  # must accept it
+  ORCA_ENV=(ORCA_TOKEN_FILE="$L_TMP/absent-token")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a missing token file fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a missing token file is named' "fail: token: $L_TMP/absent-token is missing"
+  orca_said 'launcher: a missing token file says how to create it' "chmod 600 $L_TMP/absent-token"
+  orca_said 'launcher: the identity check is reported as not run without a token' 'fail: identity: not checked (no usable token)'
+  orca_said 'launcher: the install check still runs without a token' 'ok: install: claude style'
+  L_TOK644="$L_TMP/token-644"
+  printf 'ghp_stubtoken\n' >"$L_TOK644"
+  chmod 644 "$L_TOK644"
+  L_CALLS="$L_TMP/gh-calls"
+  : >"$L_CALLS"
+  ORCA_ENV=(ORCA_TOKEN_FILE="$L_TOK644" ORCA_STUB_CALLS="$L_CALLS")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a 0644 token file fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a 0644 token file is refused with its mode' "fail: token: $L_TOK644 is mode 644, not 0600"
+  orca_said 'launcher: a 0644 token file gets the chmod hint' "run: chmod 600 $L_TOK644"
+  orca_not_said 'launcher: a 0644 token file is not used to reach GitHub' 'running as'
+  wassert 'launcher: a 0644 token file is never handed to gh' bash -c "! grep -q 'api user' '$L_CALLS'"
+  L_TOKEMPTY="$L_TMP/token-empty"
+  : >"$L_TOKEMPTY"
+  chmod 600 "$L_TOKEMPTY"
+  ORCA_ENV=(ORCA_TOKEN_FILE="$L_TOKEMPTY")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: an empty token file fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: an empty token file is named' "fail: token: $L_TOKEMPTY is empty"
+  # the stub accepts ghp_stubtoken only: told to expect another, it answers
+  # 401 - which also proves GH_TOKEN was set from the file
+  ORCA_ENV=(ORCA_STUB_TOKEN=ghp_somethingelse)
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a token gh rejects fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a failed gh api user is named with the gh error' \
+    "fail: identity: gh api user failed with the token in $L_TOKEN: gh: HTTP 401: Bad credentials"
+  orca_said 'launcher: the permission check is reported as not run without a login' \
+    "fail: repo: octocat/hello-world; the bot's permission was not checked (identity check failed)"
+
+  # 3. repo: the permission must be write or better; no origin is named
+  ORCA_ENV=(ORCA_STUB_PERM=read)
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: permission read fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: permission read is named with what is needed' \
+    'fail: repo: orca-bot has read access on octocat/hello-world; write, maintain or admin is needed'
+  ORCA_ENV=(ORCA_STUB_PERM=write)
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: permission write passes' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: permission write is reported' 'ok: repo: octocat/hello-world (orca-bot has write access)'
+  run_orca "$REPO_NONE" --check
+  wassert 'launcher: no origin remote fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: no origin remote is named with the --repo hint' \
+    'fail: repo: not detected from the current directory (no origin remote); pass --repo owner/repo'
+  orca_said 'launcher: the instance check is reported as not run without a repo' 'fail: instance: not checked (no repo)'
+
+  # 4. install: a dangling link is named with its target (the case from the
+  # machine where a temp checkout vanished under the links), a missing file
+  # is named, and the hook must be wired by the installer's own rule
+  L_CH_DANGLING="$L_TMP/ch-dangling"
+  ORCA_STYLE=claude HOME="$L_HOME" CLAUDE_HOME="$L_CH_DANGLING" ORCA_BIN="$L_OBIN" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+  rm -f "$L_CH_DANGLING/agents/orca.md"
+  ln -s /nonexistent-orca-checkout/agents/orca.md "$L_CH_DANGLING/agents/orca.md"
+  ORCA_ENV=(CLAUDE_HOME="$L_CH_DANGLING")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a dangling installed symlink fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a dangling installed symlink is named with its target' \
+    "fail: install: $L_CH_DANGLING/agents/orca.md is a dangling symlink to /nonexistent-orca-checkout/agents/orca.md"
+  orca_said 'launcher: the hook wiring is still checked beside a dangling link' \
+    "ok: install: SessionStart hook wired in $L_CH_DANGLING/settings.json"
+  rm -f "$L_CH_DANGLING/scripts/gh-watch.sh"
+  ORCA_ENV=(CLAUDE_HOME="$L_CH_DANGLING")
+  run_orca "$REPO_SSH" --check
+  orca_said 'launcher: a missing installed file is named' "fail: install: $L_CH_DANGLING/scripts/gh-watch.sh is missing"
+  L_CH_NOHOOK="$L_TMP/ch-nohook"
+  ORCA_STYLE=claude HOME="$L_HOME" CLAUDE_HOME="$L_CH_NOHOOK" ORCA_BIN="$L_OBIN" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+  printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"mine.sh"}]}]}}\n' >"$L_CH_NOHOOK/settings.json"
+  ORCA_ENV=(CLAUDE_HOME="$L_CH_NOHOOK")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a settings.json without the hook entry fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: the missing hook entry is named' \
+    "fail: install: no SessionStart hook for orca-start-watcher.sh in $L_CH_NOHOOK/settings.json"
+  orca_said 'launcher: the installed files pass beside the missing hook entry' \
+    "ok: install: claude style; playbook, hook and watcher in place under $L_CH_NOHOOK"
+  # a hand-wired entry with extra keys still counts, as it does for install.sh
+  printf '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"%s/hooks/orca-start-watcher.sh","timeout":10}]}]}}\n' \
+    "$L_CH_NOHOOK" >"$L_CH_NOHOOK/settings.json"
+  ORCA_ENV=(CLAUDE_HOME="$L_CH_NOHOOK")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a hand-wired hook entry with extra keys passes' test "$ORCA_RC" -eq 0
+  # the style is detected from what is installed; ORCA_STYLE overrides
+  L_HOME_EMPTY="$L_TMP/home-empty"
+  mkdir -p "$L_HOME_EMPTY"
+  ORCA_ENV=(HOME="$L_HOME_EMPTY" XDG_CONFIG_HOME="$L_HOME_EMPTY/.config" ORCA_BIN="$L_HOME_EMPTY/bin" ORCA_TOKEN_FILE="$L_TOKEN")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: no install at all fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: no install at all names both places it looked' \
+    "fail: install: no orca install found (neither $L_HOME_EMPTY/.claude/agents/orca.md nor $L_HOME_EMPTY/bin/gh-watch); run install.sh"
+  L_HOME_AGENTS="$L_TMP/home-agents"
+  L_OBIN_AGENTS="$L_TMP/obin-agents"
+  mkdir -p "$L_HOME_AGENTS"
+  ORCA_STYLE=agents HOME="$L_HOME_AGENTS" ORCA_BIN="$L_OBIN_AGENTS" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+  ORCA_ENV=(HOME="$L_HOME_AGENTS" XDG_CONFIG_HOME="$L_HOME_AGENTS/.config" ORCA_BIN="$L_OBIN_AGENTS" ORCA_TOKEN_FILE="$L_TOKEN")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: an agents-style install passes --check' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: the agents style is detected from its own files' 'ok: install: agents style; watcher and playbook in place'
+  ORCA_ENV=(ORCA_STYLE=agents)
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: ORCA_STYLE overrides the detected style' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: ORCA_STYLE=agents on a claude install names the missing agents files' \
+    "fail: install: $L_OBIN/gh-watch is missing"
+
+  # a launch: the checks print first, then claude is exec'd with the extra
+  # arguments, GH_TOKEN and the git identity in its environment
+  run_orca "$REPO_SSH" --resume abc123
+  wassert 'launcher: a launch exits with the exec target status' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: a launch prints the check results first' 'ok: running as orca-bot'
+  orca_said 'launcher: a launch execs claude --agent orca with the extra arguments passed through' \
+    'stub claude argv: [--agent] [orca] [--resume] [abc123]'
+  orca_said 'launcher: GH_TOKEN is exported from the token file' 'GH_TOKEN=ghp_stubtoken'
+  orca_said 'launcher: the git author name defaults to the login' 'GIT_AUTHOR_NAME=orca-bot'
+  orca_said 'launcher: the git author email defaults to the id+login noreply address' \
+    'GIT_AUTHOR_EMAIL=424242+orca-bot@users.noreply.github.com'
+  orca_said 'launcher: the git committer name matches' 'GIT_COMMITTER_NAME=orca-bot'
+  orca_said 'launcher: the git committer email matches' 'GIT_COMMITTER_EMAIL=424242+orca-bot@users.noreply.github.com'
+  wassert 'launcher: the session record is removed after claude exits' wait_record_gone
+  run_orca "$REPO_SSH"
+  orca_said 'launcher: a launch with no extra arguments execs claude --agent orca alone' \
+    'stub claude argv: [--agent] [orca]'$'\n'
+  wait_record_gone
+  ORCA_ENV=(ORCA_GIT_NAME='Orca Bot' ORCA_GIT_EMAIL=orca@example.invalid)
+  run_orca "$REPO_SSH"
+  orca_said 'launcher: ORCA_GIT_NAME overrides the git name' 'GIT_COMMITTER_NAME=Orca Bot'
+  orca_said 'launcher: ORCA_GIT_EMAIL overrides the git email' 'GIT_AUTHOR_EMAIL=orca@example.invalid'
+  wait_record_gone
+  ORCA_ENV=(ORCA_STUB_PERM=read)
+  run_orca "$REPO_SSH"
+  wassert 'launcher: a failed check refuses the launch (exit 1)' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a refused launch says so' '1 check(s) failed; not launching orca'
+  orca_not_said 'launcher: a refused launch execs nothing' 'stub claude'
+  wassert 'launcher: a refused launch writes no session record' test ! -e "$L_RECORD"
+
+  # 5. instance: a running orca holds the record with its pid; a second
+  # launch for the same repo is refused naming it, another repo is not, and
+  # the record goes when the first exits. exec keeps the pid: the
+  # backgrounded subshell IS the launcher IS the stub claude.
+  (cd "$REPO_SSH" && exec env -i HOME="$L_HOME" XDG_CONFIG_HOME="$L_HOME/.config" ORCA_BIN="$L_OBIN" PATH="$L_PATH" \
+    ORCA_STUB_TOKEN=ghp_stubtoken ORCA_STUB_HOLD=60 sh "$LAUNCHER") >"$L_TMP/held.out" 2>&1 &
+  L_HELD=$!
+  disown "$L_HELD" 2>/dev/null || true
+  LIVE_ORCAS+=("$L_HELD")
+  for _ in $(seq 1 40); do
+    [ "$(cat "$L_RECORD" 2>/dev/null)" = "$L_HELD" ] && break
+    sleep 0.25
+  done
+  wassert 'launcher: a running orca holds the session record with its pid' \
+    test "$(cat "$L_RECORD" 2>/dev/null)" = "$L_HELD"
+  run_orca "$REPO_SSH"
+  wassert 'launcher: a second launch for the same repo is refused (exit 1)' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: the refusal names the running pid' \
+    "fail: instance: orca already running for octocat/hello-world (pid $L_HELD)"
+  orca_not_said 'launcher: the refused second launch execs nothing' 'stub claude'
+  wassert 'launcher: the refused second launch leaves the first record intact' \
+    test "$(cat "$L_RECORD" 2>/dev/null)" = "$L_HELD"
+  wassert 'launcher: the refused second launch leaves the first orca running' kill -0 "$L_HELD"
+  run_orca "$REPO_SSH" --check --repo octocat/elsewhere
+  wassert 'launcher: another repo is not blocked by the running orca' test "$ORCA_RC" -eq 0
+  kill -TERM "$L_HELD" 2>/dev/null
+  wassert 'launcher: the record is removed when the running orca exits' wait_record_gone
+  # a stale record never blocks: a dead pid, or a live pid that is not an orca
+  mkdir -p "$(dirname "$L_RECORD")"
+  printf '%s\n' "$DEAD_PID" >"$L_RECORD"
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a stale record (dead pid) does not block' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: a stale record reports no other instance' 'ok: instance: no other orca running for octocat/hello-world'
+  sleep 300 &
+  L_IMPOSTOR=$!
+  disown "$L_IMPOSTOR" 2>/dev/null || true
+  printf '%s\n' "$L_IMPOSTOR" >"$L_RECORD"
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a record naming a live pid that is not an orca does not block' test "$ORCA_RC" -eq 0
+  kill -9 "$L_IMPOSTOR" 2>/dev/null
+  printf '%s\n' "$DEAD_PID" >"$L_RECORD"
+  run_orca "$REPO_SSH"
+  wassert 'launcher: a launch over a stale record proceeds' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: a launch over a stale record execs claude' 'stub claude argv: [--agent] [orca]'
+  wassert 'launcher: the record written over a stale one is removed after exit' wait_record_gone
+
+  # usage
+  run_orca "$REPO_SSH" --help
+  wassert 'launcher: --help exits 0' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: --help prints the usage' 'usage: orca [--check] [--repo owner/repo] [claude args...]'
+  orca_not_said 'launcher: --help runs no check' 'ok:'
+  run_orca "$REPO_SSH" --repo
+  wassert 'launcher: --repo without a value exits 2' test "$ORCA_RC" -eq 2
+else
+  printf 'skip: launcher cases (could not build a PATH shim)\n'
+fi
+
+# install.sh and the launcher: it lands in ORCA_BIN for both styles and both
+# modes, is named in the install output, and --uninstall removes it under
+# the same provenance rules as everything else. ~/.config/orca/token is the
+# user's: install, uninstall and restore never create, back up or touch it.
+wassert 'install: claude style (link) links the launcher into ORCA_BIN' \
+  test "$(readlink "$L_OBIN/orca")" = "$LAUNCHER"
+wassert 'install: the launcher defaults to ~/.local/bin/orca' \
+  test "$(readlink "$IH1/.local/bin/orca")" = "$LAUNCHER"
+L_HOME_AGENTS_LINK="$L_TMP/home-agents-link"
+L_OBIN_AGENTS_LINK="$L_TMP/obin-agents-link"
+mkdir -p "$L_HOME_AGENTS_LINK"
+ORCA_STYLE=agents HOME="$L_HOME_AGENTS_LINK" ORCA_BIN="$L_OBIN_AGENTS_LINK" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: agents style (link) links the launcher into ORCA_BIN' \
+  test "$(readlink "$L_OBIN_AGENTS_LINK/orca")" = "$LAUNCHER"
+L_HOME_COPY="$L_TMP/home-copy"
+L_OBIN_COPY="$L_TMP/obin-copy"
+mkdir -p "$L_HOME_COPY"
+OUTLC="$(ORCA_STYLE=claude ORCA_MODE=copy HOME="$L_HOME_COPY" ORCA_BIN="$L_OBIN_COPY" sh "$INSTALL_SH" </dev/null 2>&1)"
+wassert 'install: claude style (copy) copies the launcher into ORCA_BIN as an executable file' \
+  bash -c "test -f '$L_OBIN_COPY/orca' && test ! -L '$L_OBIN_COPY/orca' && test -x '$L_OBIN_COPY/orca' && cmp -s '$LAUNCHER' '$L_OBIN_COPY/orca'"
+printf '%s' "$OUTLC" | grep -qF "installed: $L_OBIN_COPY/orca" && LC_SAID=1 || LC_SAID=0
+wassert 'install: the launcher is listed in the install output' test "$LC_SAID" = 1
+printf '%s' "$OUTLC" | grep -qF "'orca --check' runs the preflight checks" && LC_NOTE=1 || LC_NOTE=0
+wassert 'install: the install summary says how to launch and how to check' test "$LC_NOTE" = 1
+L_HOME_ACOPY="$L_TMP/home-agents-copy"
+L_OBIN_ACOPY="$L_TMP/obin-agents-copy"
+mkdir -p "$L_HOME_ACOPY"
+ORCA_STYLE=agents ORCA_MODE=copy HOME="$L_HOME_ACOPY" ORCA_BIN="$L_OBIN_ACOPY" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: agents style (copy) copies the launcher into ORCA_BIN' \
+  bash -c "test -f '$L_OBIN_ACOPY/orca' && test ! -L '$L_OBIN_ACOPY/orca' && cmp -s '$LAUNCHER' '$L_OBIN_ACOPY/orca'"
+HOME="$L_HOME_COPY" ORCA_BIN="$L_OBIN_COPY" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'uninstall: removes a copy-mode launcher' test ! -e "$L_OBIN_COPY/orca"
+OUTLU="$(HOME="$L_HOME_AGENTS_LINK" ORCA_BIN="$L_OBIN_AGENTS_LINK" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+wassert 'uninstall: removes a linked launcher' \
+  bash -c "test ! -e '$L_OBIN_AGENTS_LINK/orca' && test ! -L '$L_OBIN_AGENTS_LINK/orca'"
+printf '%s' "$OUTLU" | grep -qF "removed: $L_OBIN_AGENTS_LINK/orca" && LU_SAID=1 || LU_SAID=0
+wassert 'uninstall: names the launcher it removed' test "$LU_SAID" = 1
+L_HOME_USER="$L_TMP/home-user"
+L_OBIN_USER="$L_TMP/obin-user"
+mkdir -p "$L_HOME_USER"
+ORCA_STYLE=claude HOME="$L_HOME_USER" ORCA_BIN="$L_OBIN_USER" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+rm -f "$L_OBIN_USER/orca"
+printf '#!/bin/sh\necho my own launcher\n' >"$L_OBIN_USER/orca"
+OUTLU2="$(HOME="$L_HOME_USER" ORCA_BIN="$L_OBIN_USER" sh "$INSTALL_SH" --uninstall </dev/null 2>&1)"
+wassert 'uninstall: a user-owned file at the launcher path is left alone' \
+  bash -c "grep -q 'my own launcher' '$L_OBIN_USER/orca'"
+printf '%s' "$OUTLU2" | grep -qF "left alone: $L_OBIN_USER/orca" && LU2_SAID=1 || LU2_SAID=0
+wassert 'uninstall: names the user-owned launcher it left alone' test "$LU2_SAID" = 1
+# the token file, through install (over a previous launcher, so a backup run
+# exists), uninstall and restore
+L_HOME_TOK="$L_TMP/home-token"
+L_OBIN_TOK="$L_TMP/obin-token"
+mkdir -p "$L_HOME_TOK/.config/orca" "$L_OBIN_TOK"
+printf 'keep-me\n' >"$L_HOME_TOK/.config/orca/token"
+chmod 600 "$L_HOME_TOK/.config/orca/token"
+printf '#!/bin/sh\necho previous launcher\n' >"$L_OBIN_TOK/orca"
+ORCA_STYLE=agents HOME="$L_HOME_TOK" ORCA_BIN="$L_OBIN_TOK" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+L_TOK_RUN="$(ls "$L_HOME_TOK/.orca-backups" 2>/dev/null)"
+wassert 'install: leaves the token file and its contents untouched' \
+  test "$(cat "$L_HOME_TOK/.config/orca/token")" = keep-me
+wassert 'install: leaves the token file mode 0600' test "$(tmode "$L_HOME_TOK/.config/orca/token")" = 600
+wassert 'install: never backs up the token file' \
+  bash -c "! grep -qF '.config/orca/token' '$L_HOME_TOK/.orca-backups/$L_TOK_RUN/MANIFEST' && ! ls '$L_HOME_TOK'/.orca-backups/*/*-token >/dev/null 2>&1"
+HOME="$L_HOME_TOK" ORCA_BIN="$L_OBIN_TOK" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'uninstall: leaves the token file and its contents untouched' \
+  test "$(cat "$L_HOME_TOK/.config/orca/token")" = keep-me
+wassert 'uninstall: leaves the token file mode 0600' test "$(tmode "$L_HOME_TOK/.config/orca/token")" = 600
+wassert 'uninstall: leaves ~/.config/orca standing while the token is in it' test -d "$L_HOME_TOK/.config/orca"
+HOME="$L_HOME_TOK" sh "$INSTALL_SH" --restore "$L_TOK_RUN" </dev/null >/dev/null 2>&1
+wassert 'restore: puts the previous launcher back' bash -c "grep -q 'previous launcher' '$L_OBIN_TOK/orca'"
+wassert 'restore: leaves the token file and its contents untouched' \
+  test "$(cat "$L_HOME_TOK/.config/orca/token")" = keep-me
+wassert 'restore: leaves the token file mode 0600' test "$(tmode "$L_HOME_TOK/.config/orca/token")" = 600
 
 # ---------------------------------------------------------------------------
 
