@@ -250,6 +250,7 @@ install_claude() {
   install_one "$ORCA_REPO/hooks/orca-start-watcher.sh" "$CH/hooks/orca-start-watcher.sh"
   install_one "$ORCA_REPO/scripts/gh-watch.sh" "$CH/scripts/gh-watch.sh"
   wire_claude_hook "$CH/settings.json"
+  install_launcher
 }
 
 wire_claude_hook() {
@@ -305,9 +306,23 @@ install_agents() {
   mkdir -p "$BIN" "$HOME/.config/orca"
   install_one "$ORCA_REPO/scripts/gh-watch.sh" "$BIN/gh-watch"
   install_one "$ORCA_REPO/agents/orca.md" "$HOME/.config/orca/AGENTS.md"
+  install_launcher
   echo "  note: point your agent at ~/.config/orca/AGENTS.md (e.g. append it to ~/.codex/AGENTS.md)."
   echo "  note: the SessionStart autostart hook is Claude-specific and was not installed;"
   echo "        launch 'gh-watch <owner>/<repo>' yourself per the playbook."
+}
+
+install_launcher() {
+  # Both styles: `orca` is how a session is started (it runs the preflight
+  # checks, exports the bot's identity and execs claude --agent orca), and it
+  # lands beside the agents-style watcher. The token it reads,
+  # ~/.config/orca/token, is the user's: never created, backed up or touched
+  # by install, --uninstall or --restore.
+  BIN="${ORCA_BIN:-$HOME/.local/bin}"
+  mkdir -p "$BIN"
+  install_one "$ORCA_REPO/bin/orca" "$BIN/orca"
+  echo "  note: start orca with '$BIN/orca' from the project (or 'orca', with $BIN on PATH);"
+  echo "        'orca --check' runs the preflight checks without launching."
 }
 
 # --- uninstall ---------------------------------------------------------------
@@ -457,8 +472,15 @@ uninstall_agents() {
   remove_installed "$BIN/gh-watch" scripts/gh-watch.sh
   remove_installed "$HOME/.config/orca/AGENTS.md" agents/orca.md
   # Only this directory is orca's own; ~/.claude/* and ~/.local/bin belong to
-  # the user. rmdir (never rm -r) so a non-empty one is left standing.
+  # the user. rmdir (never rm -r) so a non-empty one is left standing - one
+  # holding the launcher's token or session records stays.
   rmdir "$HOME/.config/orca" 2>/dev/null || true
+}
+
+uninstall_launcher() {
+  # One path for both styles, so it is swept once, on its own merits.
+  BIN="${ORCA_BIN:-$HOME/.local/bin}"
+  remove_installed "$BIN/orca" bin/orca
 }
 
 uninstall() {
@@ -483,6 +505,8 @@ uninstall() {
   uninstall_claude
   echo "  agents style:"
   uninstall_agents
+  echo "  launcher (both styles):"
+  uninstall_launcher
   if [ -d "$HOME/.orca-backups" ]; then
     echo "  note: files the installer replaced are still in $HOME/.orca-backups/"
     echo "        (untouched by uninstall - list the runs with --restore, put one"
