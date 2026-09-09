@@ -12,10 +12,11 @@ the rest and reports a digest each cycle.
 > **Run orca on private repos only.**
 >
 > Orca treats any `@bot-handle` mention in an issue or PR comment as an
-> instruction addressed to itself, and nothing checks who wrote it. On a public
-> repo that is an unauthenticated command channel into a session holding your
-> live `gh` token, running shell commands on your machine, and merging its own
-> PRs to `main`.
+> instruction addressed to itself. The playbook tells it to act only on
+> mentions from accounts with write access or better, but that is a prompt
+> instruction, not enforced code. On a public repo that is an unauthenticated
+> command channel into a session holding the bot's GitHub token, running
+> shell commands on your machine, and merging its own PRs to `main`.
 >
 > Read access is enough to comment, so even on a private repo the audience is
 > everyone with read access or better. See
@@ -28,14 +29,17 @@ the rest and reports a digest each cycle.
 | `agents/orca.md`              | The orchestrator playbook — a Claude Code agent definition.                 |
 | `scripts/gh-watch.sh`         | Polls a repo's open issues every 30s; exits on any change. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection. Enforces one watcher per repo via a pidfile, with `--status` and `--takeover` modes. |
 | `hooks/orca-start-watcher.sh` | SessionStart hook. When the session is orca, it injects a directive telling orca to launch the watcher for the repo resolved from the git remote. No network calls; always exits 0. |
-| `test/run.sh`                 | Hermetic test suite for both scripts (stubbed `gh`, temp state dirs).       |
+| `bin/orca`                    | The launcher, and how a session is started. Runs the preflight checks — tools on `PATH`, the bot's token file and the login it authenticates, the bot's write access on the repository, the installed files and hook wiring, no second orca on the repository — then exports `GH_TOKEN` and the bot's git identity and execs `claude --agent orca`. `orca --check` runs the checks alone. |
+| `test/run.sh`                 | Hermetic test suite for the scripts, the installer and the launcher (stubbed `gh` and `claude`, temp HOMEs and state dirs). |
 
 ## Requirements
 
 - Claude Code CLI
-- `gh` (GitHub CLI), authenticated for the repos you want orca to manage
+- `gh` (GitHub CLI). Orca authenticates with the bot's own token (see
+  [Bot identity](#bot-identity)), so it needs no `gh auth login` of its own
 - `jq`
 - bash, git
+- a GitHub account for the bot, with write access to the repos orca manages
 
 ## Install
 
@@ -82,6 +86,9 @@ Styles:
   - the SessionStart hook that tells orca to launch the watcher
     (`hooks/orca-start-watcher.sh`).
 
+Both styles also install the launcher, `bin/orca`, to `~/.local/bin/orca`
+(`ORCA_BIN`); it is how a session is started (see [Usage](#usage)).
+
 Environment overrides:
 
 | Variable      | Default                | Meaning                                        |
@@ -92,13 +99,57 @@ Environment overrides:
 | `ORCA_REF`    | `v0.1.0`               | the release tag the piped install checks out, and moves an existing clone to on re-run; `ORCA_REF=main` for development |
 | `ORCA_MODE`   | `link`                 | `copy` to copy files instead of symlinking     |
 | `CLAUDE_HOME` | `~/.claude`            | claude-style destination                       |
-| `ORCA_BIN`    | `~/.local/bin`         | agents-style watcher destination               |
+| `ORCA_BIN`    | `~/.local/bin`         | launcher destination (both styles) and agents-style watcher destination |
+| `ORCA_TOKEN_FILE` | `~/.config/orca/token` | (launcher) the bot's token file; `~/.config` follows `XDG_CONFIG_HOME` |
+| `ORCA_GIT_NAME` | the bot's login      | (launcher) git author and committer name orca commits with |
+| `ORCA_GIT_EMAIL` | `<id>+<login>@users.noreply.github.com` | (launcher) git author and committer email orca commits with |
 
 Re-runs are idempotent. Anything replaced is backed up to
 `~/.orca-backups/<timestamp>/`.
 
 `~/.claude/scripts/` is the home for runtime helper scripts. Do not use
 `~/.claude/jobs/` — Claude Code reserves it for background-job state.
+
+### Bot identity
+
+Orca runs as a GitHub account of its own, so every comment, branch and PR it
+makes is the bot's, and a mention from you is unambiguously an instruction.
+The launcher, `orca`, supplies that identity; your own `gh auth` session is
+neither used nor changed. Setup, once:
+
+1. Create the bot account on GitHub — an ordinary user account.
+2. Give it **write** access on each repository orca will manage (repository
+   Settings → Collaborators and teams).
+3. Signed in as the bot, mint a **fine-grained personal access token** scoped
+   to those repositories only, with these repository permissions: Contents
+   read/write, Issues read/write, Pull requests read/write, Metadata read.
+   Add Workflows read/write only if orca must edit files under
+   `.github/workflows/`.
+4. Store it where only you can read it — the launcher refuses a token file
+   that is empty or whose mode is not exactly `0600`:
+
+   ```sh
+   mkdir -p ~/.config/orca
+   (umask 077 && cat > ~/.config/orca/token)   # paste the token, Enter, Ctrl-D
+   chmod 600 ~/.config/orca/token
+   ```
+
+   `ORCA_TOKEN_FILE` points the launcher at another file; `~/.config`
+   follows `XDG_CONFIG_HOME`.
+5. From a checkout of a managed repository, run `orca --check`. It prints
+   one `ok:` or `fail:` line per check, names every failure in one run, and
+   launches nothing; `running as <login>` is the account it found. Then
+   start orca with `orca`.
+
+What the launcher does once the checks pass: it exports the token as
+`GH_TOKEN`, sets `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`
+and `GIT_COMMITTER_EMAIL` to the bot (`ORCA_GIT_NAME` / `ORCA_GIT_EMAIL`
+override; the defaults are the login and its
+`<id>+<login>@users.noreply.github.com` address, which GitHub links to the
+account), and execs `claude --agent orca`. `gh`, `git`, the watcher and every
+worker inherit them; nothing else on the machine changes account. The token
+file is yours: install, `--uninstall` and `--restore` never create, back up,
+or remove it, and the launcher never prints it.
 
 ### Uninstall
 
@@ -122,6 +173,7 @@ Removes:
 - `~/.claude/{agents/orca.md,hooks/orca-start-watcher.sh,scripts/gh-watch.sh}`
 - `~/.local/bin/gh-watch` and `~/.config/orca/AGENTS.md` (plus
   `~/.config/orca` itself, if empty)
+- `~/.local/bin/orca`, the launcher (both styles)
 - the `SessionStart` entry it wired into `~/.claude/settings.json`
 
 Only if it is what the installer would have written: an **absolute** symlink
@@ -153,6 +205,10 @@ Deliberately left alone:
   the same thing install does when it wires the hook.)
 - **Directories that are not orca's** — `~/.claude/*` and `~/.local/bin` stay
   whatever else they hold.
+- **The bot's token.** `~/.config/orca/token` — and the launcher's
+  `sessions/` records beside it — are never created, backed up, or removed
+  by install, uninstall, or restore. `~/.config/orca` is only ever removed
+  when it is empty.
 - **The checkout at `~/.local/share/orca`.** Delete it yourself if you want
   it gone.
 
@@ -194,20 +250,43 @@ honours the same `$HOME` guard.
 From the project you want orca to manage:
 
 ```sh
-claude --agent orca
+orca
 ```
+
+The launcher runs its preflight checks first and refuses to start if any
+fails, naming every failure in one run:
+
+1. `gh`, `git`, `jq` and `claude` on `PATH`;
+2. the token file exists, is not empty and is mode `0600`, and `gh api user`
+   accepts it (`running as <login>`);
+3. the repository, detected from the checkout's `origin` remote
+   (`--repo owner/repo` overrides), and the bot's permission on it — write,
+   maintain or admin;
+4. the installed files resolve to real files (a dangling symlink is named
+   with its target) and, claude style, the `SessionStart` hook is wired in
+   `settings.json`;
+5. no other orca holds this repository
+   (`~/.config/orca/sessions/<repo-slug>` records the running one's pid; a
+   record left by a dead session never blocks).
+
+`orca --check` runs the same checks and exits without launching. Anything
+else on the command line is passed through to `claude`.
 
 On session start the hook injects the watcher directive; orca launches
 `gh-watch.sh <owner>/<repo>` as a background job and begins its cycle:
-assess open issues, plan, dispatch, review, merge, digest.
+assess open issues, plan, dispatch, review, merge, digest. The first digest
+names the account it runs as.
 
 Signals orca reacts to:
 
-- An issue **assigned to the configured bot handle** is dispatchable agent work.
+- An issue **assigned to the bot handle** is dispatchable agent work.
 - Any **@bot-handle mention** in an issue or PR comment is a message to orca.
 
-Set the bot handle in the project's `CLAUDE.md`; orca asks once at startup if
-it is unset.
+The bot handle is the login orca runs as. Orca's own comments are never
+signals, and it acts on an instruction only when its author has write access
+or better on the repository; anything else is surfaced in the digest. A
+project `CLAUDE.md` may still name the handle for the assignment convention;
+that value is the fallback for a session started without the launcher.
 
 ### gh-watch.sh exit codes
 
@@ -219,8 +298,8 @@ it is unset.
 
 ## Safety and blast radius
 
-Orca is an autonomous agent holding a live `gh` token, with write access to
-your repo and a shell on your machine. Read this before pointing it at
+Orca is an autonomous agent holding the bot's GitHub token, with write access
+to your repo and a shell on your machine. Read this before pointing it at
 anything.
 
 ### Issue and PR comments are an instruction channel
@@ -228,12 +307,15 @@ anything.
 `agents/orca.md` defines two signals: an issue **assigned to the bot handle**
 is dispatchable work, and **any `@bot-handle` mention** in an issue or PR
 comment is "a message TO this orchestrator session; read it and dispatch/act
-accordingly" (`agents/orca.md:41-45`).
+accordingly" (`agents/orca.md:50-54`).
 
-Nothing checks who wrote that comment. There is no allow-list, author check, or
-trusted-commenter setting anywhere in this repo. On a public repo, every
-drive-by commenter is therefore addressing an agent that can run commands on
-your machine and merge to `main` — an unauthenticated prompt-injection channel.
+The playbook tells orca to ignore its own comments and to act only on
+instructions from accounts with write access or better, surfacing the rest in
+the digest (`agents/orca.md:55-62`). That is a prompt instruction, not
+enforced code: no script in this repo checks the author, so treat it as a
+mitigation, not a boundary. On a public repo, every drive-by commenter is
+still addressing an agent that can run commands on your machine and merge to
+`main` — an unauthenticated prompt-injection channel.
 
 **Run orca on private repos only.** That shrinks the audience to people you
 have granted some access — but be precise about who that is: **read access is
@@ -252,9 +334,9 @@ On your machine:
 - Runs `gh-watch.sh` as a long-lived background job polling GitHub every 30s
   (`scripts/gh-watch.sh`).
 - Creates git worktrees and branches under `.claude/worktrees/`, and writes
-  scratch state under `.claude/scratch/` (`agents/orca.md:107-109`).
+  scratch state under `.claude/scratch/` (`agents/orca.md:124-126`).
 - Dispatches subagent workers that edit files and run the project's
-  `build | lint | typecheck | test` commands (`agents/orca.md:113-114`).
+  `build | lint | typecheck | test` commands (`agents/orca.md:130-131`).
 - **Claude-style install only:** `install.sh` symlinks (or copies) the agent,
   hook, and watcher into `~/.claude/` and adds a `SessionStart` hook to
   `~/.claude/settings.json` (`install.sh:78-114`). That is a global change, not
@@ -270,6 +352,10 @@ On your machine:
   your machine track that release. `ORCA_REF=main` follows `main` instead,
   and a re-run then changes them with no review step. `ORCA_MODE=copy` pins
   what you reviewed either way.
+- Both styles install the launcher to `~/.local/bin/orca`. It reads
+  `~/.config/orca/token` and nothing else there; it writes only
+  `~/.config/orca/sessions/<repo-slug>`, the pid of the running orca, and
+  removes it when that orca exits.
 
 On your repo: comments on issues, sets labels, pushes branches, opens PRs,
 posts and resolves review threads, requests reviewers, and merges its own PRs.
@@ -281,30 +367,38 @@ whatever tool permissions your Claude Code session already grants.
 ### GitHub token scopes
 
 `install.sh` never invokes `gh` — it neither checks nor requests scopes. Orca
-uses whatever your existing `gh auth` session already has.
+does not use your `gh auth` session at all: the launcher exports the bot's own
+token from `~/.config/orca/token` as `GH_TOKEN`, and everything orca runs —
+`gh`, `git`, the watcher, the workers — acts as the bot, with the least
+privilege that token carries (see [Bot identity](#bot-identity)). Your own
+session is untouched, and revoking the bot's token stops orca without
+touching anything else. Before anything starts, the launcher confirms the
+token authenticates and that the bot has write access on the repository.
 
 These are the operations orca performs over a full issue-to-merge run. Only the
-first two rows are executable `gh` calls in this repo's scripts; every other row
+rows that name a script are executable `gh` calls in this repo; every other row
 is a step the playbook instructs the model to take, so the "Where" column points
 at prose, not at code that enforces it.
 
 | Operation                                                        | Where                                                            | Needs                    |
 | ---------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------ |
+| Verify the token and read the bot's login and id                 | `bin/orca` — `gh api user`                                       | read user profile        |
+| Read the bot's permission on the repository                      | `bin/orca` — `gh api repos/<repo>/collaborators/<login>/permission` | read repo metadata    |
 | Poll open issues every 30s — number, `updated_at`, labels only   | `scripts/gh-watch.sh:201` — `gh api repos/<repo>/issues`         | read issues              |
-| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:54`, `agents/orca.md:22` — `gh repo view`   | read repo metadata       |
-| Read issue assignees and recent comments each cycle              | `agents/orca.md:44-45`                                           | read issues              |
-| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:104-106`                                         | write issues             |
-| Push the worker branch                                           | `agents/orca.md:115`                                             | write repo contents      |
-| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:115`, `agents/orca.md:122-126`                   | write pull requests      |
-| Request an external reviewer                                     | `agents/orca.md:118` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
-| Merge the PR                                                     | `agents/orca.md:127`                                             | write contents and PRs   |
+| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:54`, `agents/orca.md:24` — `gh repo view`   | read repo metadata       |
+| Read issue assignees and recent comments each cycle              | `agents/orca.md:53-54`                                           | read issues              |
+| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:121-123`                                         | write issues             |
+| Push the worker branch                                           | `agents/orca.md:132`                                             | write repo contents      |
+| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:132`, `agents/orca.md:139-143`                   | write pull requests      |
+| Request an external reviewer                                     | `agents/orca.md:135` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
+| Merge the PR                                                     | `agents/orca.md:144`                                             | write contents and PRs   |
 
-Net: a classic token needs `repo`, whose private-repo access covers all of the
-above — plus `workflow` if a worker ever changes a file under
-`.github/workflows/`. A fine-grained token needs Metadata: read, Issues:
-read/write, Contents: read/write, Pull requests: read/write — plus Workflows:
-write for that same workflow-file case — scoped to the repos you want orca to
-manage, and no others.
+Net, for the bot's fine-grained token: Metadata: read, Issues: read/write,
+Contents: read/write, Pull requests: read/write — plus Workflows: write if a
+worker ever changes a file under `.github/workflows/` — scoped to the repos
+you want orca to manage, and no others. (A classic token would need `repo`,
+whose private-repo access covers all of the above, plus `workflow` for that
+same case; prefer the fine-grained one.)
 
 Two properties of the 30s poll are worth knowing, since it is the one piece of
 this that really is code. It requests `?state=open&per_page=50` and does not
@@ -313,11 +407,11 @@ changes below that cut-off are missed. And GitHub's `/issues` endpoint returns
 pull requests alongside issues, so the watcher sees PR activity as well.
 
 The watcher makes roughly 120 requests per hour per repo (one poll every 30s),
-counting against your token's REST rate limit.
+counting against the bot token's REST rate limit.
 
 ### What gates a merge
 
-The worker lifecycle in `agents/orca.md:116-130` specifies:
+The worker lifecycle in `agents/orca.md:133-147` specifies:
 
 1. An internal review agent is spawned for every PR, checking issue completion,
    security, maintainability, and bugs. Its findings are posted as PR review
@@ -332,7 +426,7 @@ The worker lifecycle in `agents/orca.md:116-130` specifies:
 6. **`on-hold` gate:** an `on-hold` label on the PR or its issue blocks merge
    and dispatch until the label is removed or a bot-handle comment signs off.
 7. On issues, a `needs-info` label means wait; `ready-for-agent` means dispatch
-   without asking (`agents/orca.md:104-106`).
+   without asking (`agents/orca.md:121-123`).
 
 **These gates are prompt instructions, not enforced code.** The executable
 files in this repo are the watcher, the SessionStart hook, the installer, and
@@ -346,13 +440,13 @@ as well as the model follows its playbook.
   GitHub's own enforcement applies to it as to any other client — but that has
   not been tested here, and the playbook defines no handling for a merge GitHub
   rejects. The playbook does say never to commit or merge local `main`
-  (`agents/orca.md:115`); work always goes through a branch and a PR.
+  (`agents/orca.md:132`); work always goes through a branch and a PR.
 - **There is no dry-run or approval mode.** No flag, environment variable, or
   setting in this repo makes orca plan without acting, or ask before it
   comments, pushes, or merges. Once running, it acts on its own.
 - **Token cost per cycle is unmeasured.** Every watcher exit re-invokes the
   model, and the poll cadence adapts between 60s and ~1800s depending on
-  activity (`agents/orca.md:54-57`), so cost scales with how busy the repo is.
+  activity (`agents/orca.md:71-74`), so cost scales with how busy the repo is.
   No measured figure is available; tracked in
   [#23](https://github.com/iQonAi/orca/issues/23).
 - **The `agents` install style is untested.** Orca has never been run under a
@@ -365,9 +459,10 @@ as well as the model follows its playbook.
 bash test/run.sh
 ```
 
-The suite is hermetic: a stub `gh` replaces the network and
-`GH_WATCH_STATE_DIR` redirects pidfiles to a temp dir, so a real watcher on
-the machine is neither seen nor disturbed.
+The suite is hermetic: a stub `gh` (and a stub `claude`, for the launcher)
+replaces the network, temp HOMEs stand in for `~`, and `GH_WATCH_STATE_DIR`
+redirects pidfiles to a temp dir, so a real watcher on the machine is neither
+seen nor disturbed.
 
 The shell scripts are formatted with `shfmt` v3.14.0 (`shfmt -i 2 -ci`), and
 CI fails on any diff from that style.
