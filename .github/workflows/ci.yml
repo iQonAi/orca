@@ -45,6 +45,7 @@ jobs:
         run: |
           shellcheck \
             install.sh \
+            bin/orca \
             scripts/gh-watch.sh \
             hooks/orca-start-watcher.sh
 
@@ -75,6 +76,7 @@ jobs:
         run: |
           shfmt -i 2 -ci -d \
             install.sh \
+            bin/orca \
             scripts/gh-watch.sh \
             hooks/orca-start-watcher.sh \
             test/run.sh

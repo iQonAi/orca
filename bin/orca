@@ -1,0 +1,346 @@
+#!/bin/sh
+#
+# orca - launcher. Runs the preflight checks, exports the bot's GitHub
+# identity and execs `claude --agent orca` (#43).
+#
+# Usage: orca [--check] [--repo owner/repo] [claude args...]
+#   --check            run the checks, print the results, exit 0/1; launch
+#                      nothing, write nothing
+#   --repo owner/repo  check this repository instead of the one detected from
+#                      the origin remote of the current directory
+#   --help             usage
+#   Anything else is passed through to claude.
+#
+# Orca acts as a GitHub account of its own. Its token lives in
+# ${XDG_CONFIG_HOME:-~/.config}/orca/token (ORCA_TOKEN_FILE overrides), is
+# read only here and is never printed; nothing else on the machine changes
+# account. Every check runs before the launch is decided, so one run names
+# every failure. On success GH_TOKEN and the git author/committer identity
+# (ORCA_GIT_NAME / ORCA_GIT_EMAIL, else the login and its
+# <id>+<login>@users.noreply.github.com address) are exported and claude
+# replaces this process: gh, git, the watcher and every worker inherit them.
+#
+# Checks, in order (each prints `ok:` or `fail:` with the reason):
+#   1. tools     gh, git, jq and claude on PATH
+#   2. identity  the token file exists, is not empty and is mode 0600 (a file
+#                group or world can read is refused, unread); gh api user
+#                succeeds with it - `running as <login>`
+#   3. repo      owner/repo from the checkout's origin remote (or --repo); the
+#                bot's permission on it is write, maintain or admin
+#   4. install   the playbook, the SessionStart hook and the watcher resolve
+#                to real files - a dangling symlink is named - and, claude
+#                style, the hook is wired in settings.json by the installer's
+#                own identity rule (an entry whose command is the hook path,
+#                in the ~ or the absolute spelling)
+#   5. instance  no live orca holds this repository's session record
+#
+# Session record: <config>/orca/sessions/<repo-slug> holds the pid of the
+# orca running for that repository. `exec` replaces this shell, so no EXIT
+# trap of its own can outlive the launch: a detached subshell polls the pid
+# instead and removes the record when it dies. A record naming a dead pid, or
+# a live pid whose command line is not an orca launch, is stale and never
+# blocks a launch.
+
+set -u
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/orca"
+TOKEN_FILE="${ORCA_TOKEN_FILE:-$CONFIG_DIR/token}"
+SESSIONS_DIR="$CONFIG_DIR/sessions"
+CH="${CLAUDE_HOME:-$HOME/.claude}"
+# as in install.sh: `/x/` names the same home as `/x`
+CH="${CH%"${CH##*[!/]}"}"
+BIN="${ORCA_BIN:-$HOME/.local/bin}"
+
+usage() {
+  cat <<EOF
+usage: orca [--check] [--repo owner/repo] [claude args...]
+
+Runs the preflight checks, exports the bot's GitHub identity and execs
+claude --agent orca. Every check runs before the launch is decided.
+
+  --check            run the checks and exit: 0 when all pass, 1 otherwise;
+                     launch nothing, write nothing
+  --repo owner/repo  check this repository instead of the one detected from
+                     the origin remote of the current directory
+  --help             this text
+
+Anything else is passed through to claude.
+
+Files
+  $TOKEN_FILE
+      the bot's token, mode 0600 (ORCA_TOKEN_FILE overrides)
+  $SESSIONS_DIR/<repo-slug>
+      pid of the orca running for that repository
+
+Environment
+  ORCA_GIT_NAME, ORCA_GIT_EMAIL  git identity; default: the login, and
+                                 <id>+<login>@users.noreply.github.com
+  ORCA_STYLE                     claude or agents; skips install detection
+  CLAUDE_HOME, ORCA_BIN          where the install check looks
+                                 (~/.claude and ~/.local/bin)
+EOF
+}
+
+CHECK=0
+REPO=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) CHECK=1 ;;
+    --repo)
+      if [ $# -lt 2 ]; then
+        echo "orca: --repo needs owner/repo" >&2
+        exit 2
+      fi
+      shift
+      REPO=$1
+      ;;
+    --repo=*) REPO=${1#--repo=} ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *) break ;;
+  esac
+  shift
+done
+
+FAILS=0
+ok() { echo "ok: $*"; }
+fail() {
+  echo "fail: $*"
+  FAILS=$((FAILS + 1))
+}
+NL=$(printf '\nx')
+NL=${NL%x}
+first_line() { printf '%s\n' "${1%%"$NL"*}"; }
+
+# --- 1. tools ----------------------------------------------------------------
+tools_ok=1
+for t in gh git jq claude; do
+  if ! command -v "$t" >/dev/null 2>&1; then
+    fail "tools: $t not on PATH"
+    tools_ok=0
+  fi
+done
+if [ "$tools_ok" = 1 ]; then
+  ok "tools: gh, git, jq, claude on PATH"
+fi
+
+# --- 2. identity -------------------------------------------------------------
+# Permission bits in octal: GNU stat first, BSD stat second. -L: a token file
+# that is a symlink is judged by the file it points at.
+file_mode() {
+  stat -L -c '%a' "$1" 2>/dev/null || stat -L -f '%Lp' "$1" 2>/dev/null
+}
+token=
+login=
+uid=
+if [ ! -f "$TOKEN_FILE" ]; then
+  fail "token: $TOKEN_FILE is missing; store the bot's token there, then run: chmod 600 $TOKEN_FILE"
+elif [ ! -s "$TOKEN_FILE" ]; then
+  fail "token: $TOKEN_FILE is empty"
+else
+  mode=$(file_mode "$TOKEN_FILE")
+  case "$mode" in
+    600 | 0600)
+      ok "token: $TOKEN_FILE (mode 0600)"
+      token=$(cat "$TOKEN_FILE")
+      ;;
+    *)
+      fail "token: $TOKEN_FILE is mode ${mode:-unknown}, not 0600 (group or other can read it); run: chmod 600 $TOKEN_FILE"
+      ;;
+  esac
+fi
+if [ -n "$token" ]; then
+  if out=$(GH_TOKEN="$token" gh api user --jq '"\(.login) \(.id)"' 2>&1) && [ -n "$out" ]; then
+    login=${out%% *}
+    uid=${out#* }
+    ok "running as $login"
+  else
+    fail "identity: gh api user failed with the token in $TOKEN_FILE: $(first_line "$out")"
+  fi
+else
+  fail "identity: not checked (no usable token)"
+fi
+
+# --- 3. repo -----------------------------------------------------------------
+# Local, like the SessionStart hook: parsed from the origin remote, so a
+# repository the bot cannot see is still named, and the permission check
+# below says why rather than "no repo".
+repo_from_origin() {
+  url=$(git config --get remote.origin.url 2>/dev/null) || return 1
+  [ -n "$url" ] || return 1
+  p=${url%.git}
+  p=${p#*://*/} # https://host/owner/repo -> owner/repo
+  p=${p#*:}     # git@host:owner/repo -> owner/repo
+  case "$p" in */*) ;; *) return 1 ;; esac
+  name=${p##*/}
+  rest=${p%/*}
+  owner=${rest##*/}
+  [ -n "$owner" ] && [ -n "$name" ] || return 1
+  printf '%s/%s\n' "$owner" "$name"
+}
+if [ -n "$REPO" ]; then
+  repo=$REPO
+else
+  repo=$(repo_from_origin) || repo=
+fi
+case "$repo" in
+  "") fail "repo: not detected from the current directory (no origin remote); pass --repo owner/repo" ;;
+  */*) ;;
+  *)
+    fail "repo: '$repo' is not owner/repo"
+    repo=
+    ;;
+esac
+if [ -n "$repo" ]; then
+  if [ -z "$login" ]; then
+    fail "repo: $repo; the bot's permission was not checked (identity check failed)"
+  elif perm=$(GH_TOKEN="$token" gh api "repos/$repo/collaborators/$login/permission" --jq .permission 2>&1); then
+    case "$perm" in
+      write | maintain | admin) ok "repo: $repo ($login has $perm access)" ;;
+      *) fail "repo: $login has ${perm:-no} access on $repo; write, maintain or admin is needed" ;;
+    esac
+  else
+    fail "repo: could not read $login's permission on $repo: $(first_line "$perm")"
+  fi
+fi
+
+# --- 4. install --------------------------------------------------------------
+style=${ORCA_STYLE:-}
+case "$style" in
+  claude | agents) ;;
+  *)
+    if [ -e "$CH/agents/orca.md" ] || [ -L "$CH/agents/orca.md" ]; then
+      style=claude
+    elif [ -e "$BIN/gh-watch" ] || [ -L "$BIN/gh-watch" ] || [ -e "$HOME/.config/orca/AGENTS.md" ]; then
+      style=agents
+    else
+      style=
+    fi
+    ;;
+esac
+# -f follows a link, so a link to a real file passes; a dangling one is named
+# with its target, because the fix is a re-install or a repaired checkout.
+check_file() {
+  if [ -L "$1" ] && [ ! -e "$1" ]; then
+    fail "install: $1 is a dangling symlink to $(readlink "$1")"
+    return 1
+  fi
+  if [ ! -f "$1" ]; then
+    fail "install: $1 is missing"
+    return 1
+  fi
+  return 0
+}
+case "$style" in
+  claude)
+    files_ok=1
+    for f in "$CH/agents/orca.md" "$CH/hooks/orca-start-watcher.sh" "$CH/scripts/gh-watch.sh"; do
+      check_file "$f" || files_ok=0
+    done
+    if [ "$files_ok" = 1 ]; then
+      ok "install: claude style; playbook, hook and watcher in place under $CH"
+    fi
+    # Wired means an entry whose hooks[].command is the hook path, in either
+    # spelling the installer knows (install.sh wire_claude_hook): the ~ form
+    # it writes for the default home, and the absolute form.
+    hook_abs="$CH/hooks/orca-start-watcher.sh"
+    if [ "$CH" = "$HOME/.claude" ]; then
+      # shellcheck disable=SC2088
+      hook_tilde='~/.claude/hooks/orca-start-watcher.sh'
+    else
+      hook_tilde=$hook_abs
+    fi
+    if [ ! -f "$CH/settings.json" ]; then
+      fail "install: $CH/settings.json is missing, so no SessionStart hook is wired (run install.sh)"
+    elif ! command -v jq >/dev/null 2>&1; then
+      fail "install: cannot read $CH/settings.json without jq"
+    else
+      jq -e --arg a "$hook_tilde" --arg b "$hook_abs" \
+        'any((.hooks.SessionStart // [])[] | objects | .hooks[]? | objects | .command; . == $a or . == $b)' \
+        "$CH/settings.json" >/dev/null 2>&1
+      case $? in
+        0) ok "install: SessionStart hook wired in $CH/settings.json" ;;
+        1) fail "install: no SessionStart hook for orca-start-watcher.sh in $CH/settings.json (run install.sh)" ;;
+        *) fail "install: $CH/settings.json is not valid JSON" ;;
+      esac
+    fi
+    ;;
+  agents)
+    files_ok=1
+    for f in "$BIN/gh-watch" "$HOME/.config/orca/AGENTS.md"; do
+      check_file "$f" || files_ok=0
+    done
+    if [ "$files_ok" = 1 ]; then
+      ok "install: agents style; watcher and playbook in place"
+    fi
+    ;;
+  *)
+    fail "install: no orca install found (neither $CH/agents/orca.md nor $BIN/gh-watch); run install.sh"
+    ;;
+esac
+
+# --- 5. instance -------------------------------------------------------------
+# Same slug as the watcher's pidfile. A pid is an incumbent only if it is
+# alive AND its command line is an orca launch (pids get recycled), and it
+# is never this process (a recycled pid could be our own).
+live_orca() {
+  case "$1" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$1" != "$$" ] || return 1
+  kill -0 "$1" 2>/dev/null || return 1
+  ps -ww -o args= -p "$1" 2>/dev/null | grep -qE '(^|[[:space:]/])orca([[:space:]]|$)'
+}
+record=
+if [ -n "$repo" ]; then
+  record="$SESSIONS_DIR/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_')"
+  incumbent=$(cat "$record" 2>/dev/null)
+  if live_orca "$incumbent"; then
+    fail "instance: orca already running for $repo (pid $incumbent)"
+  else
+    ok "instance: no other orca running for $repo"
+  fi
+else
+  fail "instance: not checked (no repo)"
+fi
+
+# --- decide ------------------------------------------------------------------
+if [ "$FAILS" -gt 0 ]; then
+  if [ "$CHECK" = 1 ]; then
+    echo "$FAILS check(s) failed"
+  else
+    echo "$FAILS check(s) failed; not launching orca"
+  fi
+  exit 1
+fi
+if [ "$CHECK" = 1 ]; then
+  echo "all checks passed"
+  exit 0
+fi
+
+# --- launch ------------------------------------------------------------------
+mkdir -p "$SESSIONS_DIR" 2>/dev/null
+if ! printf '%s\n' "$$" >"$record" 2>/dev/null; then
+  echo "orca: could not write the session record $record" >&2
+  exit 1
+fi
+# The janitor: detached from the terminal's stdio so a caller capturing our
+# output is not held open, deaf to the terminal's signals so it outlives a
+# closed window, and it removes only a record that still names this pid.
+(
+  trap '' HUP INT TERM
+  while kill -0 "$$" 2>/dev/null; do sleep 1; done
+  [ "$(cat "$record" 2>/dev/null)" = "$$" ] && rm -f "$record"
+) </dev/null >/dev/null 2>&1 &
+
+GH_TOKEN=$token
+GIT_AUTHOR_NAME=${ORCA_GIT_NAME:-$login}
+GIT_AUTHOR_EMAIL=${ORCA_GIT_EMAIL:-$uid+$login@users.noreply.github.com}
+GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
+GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
+export GH_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+exec claude --agent orca "$@"
