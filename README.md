@@ -126,7 +126,7 @@ neither used nor changed. Setup, once:
    Add Workflows read/write only if orca must edit files under
    `.github/workflows/`.
 4. Store it where only you can read it — the launcher refuses a token file
-   that is empty or whose mode is not exactly `0600`:
+   that is empty or whose mode is not `0600` or `0400`:
 
    ```sh
    mkdir -p ~/.config/orca
@@ -257,8 +257,8 @@ The launcher runs its preflight checks first and refuses to start if any
 fails, naming every failure in one run:
 
 1. `gh`, `git`, `jq` and `claude` on `PATH`;
-2. the token file exists, is not empty and is mode `0600`, and `gh api user`
-   accepts it (`running as <login>`);
+2. the token file exists, is not empty and is mode `0600` or `0400`, and
+   `gh api user` accepts it (`running as <login>`);
 3. the repository, detected from the checkout's `origin` remote
    (`--repo owner/repo` overrides), and the bot's permission on it — write,
    maintain or admin;
