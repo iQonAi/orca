@@ -353,9 +353,10 @@ On your machine:
   and a re-run then changes them with no review step. `ORCA_MODE=copy` pins
   what you reviewed either way.
 - Both styles install the launcher to `~/.local/bin/orca`. It reads
-  `~/.config/orca/token` and nothing else there; it writes only
-  `~/.config/orca/sessions/<repo-slug>`, the pid of the running orca, and
-  removes it when that orca exits.
+  `~/.config/orca/token` and nothing else there. On launch it creates
+  `~/.config/orca/sessions/` if it is absent and writes one file in it,
+  `<repo-slug>`, holding the pid of the running orca; it removes that file
+  when that orca exits, and the directory stays.
 
 On your repo: comments on issues, sets labels, pushes branches, opens PRs,
 posts and resolves review threads, requests reviewers, and merges its own PRs.
