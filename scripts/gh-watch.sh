@@ -85,13 +85,18 @@ pidfile="$state_dir/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_').pid"
 # which is the classic self-match bug. The trailing alternative with no repo
 # argument covers a watcher launched with the repo auto-detected from cwd:
 # only such a watcher for THIS repo can have written this repo's pidfile.
+# Mode words are allowed generically, not one by one: a watcher launched as
+# `gh-watch.sh --takeover <repo>` keeps that word in its argv for the rest of
+# its life, and matching only the bare form answered "none running" about a
+# watcher that was polling (#30). `--[A-Za-z-]+` cannot swallow the repo
+# argument, which carries a `/`, so the anchoring is unweakened.
 # `-ww` is required — BSD `ps` truncates the command column to terminal width.
 live_watcher() {
   [ -n "${1:-}" ] || return 1
   case "$1" in '' | *[!0-9]*) return 1 ;; esac
   kill -0 "$1" 2>/dev/null || return 1
   ps -ww -o args= -p "$1" 2>/dev/null |
-    grep -qE "gh-watch\.sh([[:space:]]+$repo)?[[:space:]]*$"
+    grep -qE "gh-watch\.sh([[:space:]]+--[A-Za-z-]+)*([[:space:]]+$repo)?[[:space:]]*$"
 }
 
 if [ "$mode" = status ]; then

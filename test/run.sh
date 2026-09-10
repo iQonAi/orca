@@ -209,19 +209,30 @@ wassert() {
   fi
 }
 
-# start_live <repo> — launch a real (stubbed) watcher that stays in its poll
-# loop; returns its pid in REPLY once it has taken the pidfile.
-start_live() {
-  PATH="$STUB_BIN:$PATH" GH_STUB_OUT='[{"n":1}]' "$BASH_BIN" "$WATCH_SCRIPT" "$1" >/dev/null 2>&1 &
-  local pid=$! f i
+# track_live <pid> <repo> — register a launched watcher for reaping and wait
+# until it has taken the repo's pidfile; returns its pid in REPLY.
+track_live() {
+  local pid="$1" f i
   disown "$pid" 2>/dev/null || true # keep bash from printing job-kill notices
   LIVE_WATCHERS+=("$pid")
-  f="$(watch_pidfile "$1")"
+  f="$(watch_pidfile "$2")"
   for i in $(seq 1 20); do
     [ -s "$f" ] && break
     sleep 0.25
   done
   REPLY="$pid"
+}
+
+# start_live <repo> [mode-word...] — launch a real (stubbed) watcher that stays
+# in its poll loop; returns its pid in REPLY once it has taken the pidfile.
+# Mode words go ahead of the repo, exactly where a real launch spells them, so
+# a case can produce the argv of a watcher started with `--takeover`.
+start_live() {
+  local repo="$1"
+  shift
+  PATH="$STUB_BIN:$PATH" GH_STUB_OUT='[{"n":1}]' \
+    "$BASH_BIN" "$WATCH_SCRIPT" "$@" "$repo" >/dev/null 2>&1 &
+  track_live "$!" "$repo"
 }
 
 # A live watcher for repo A holds the pidfile -> a second launch is refused.
@@ -331,6 +342,22 @@ run_watch_in "$GH_WATCH_STATE_DIR" 1 'taking over from watcher pid' \
   '' --takeover 'octocat/watch-take'
 wassert 'gh-watch: --takeover left no incumbent running' \
   bash -c '! kill -0 '"$LIVE_TAKE"' 2>/dev/null'
+
+# A watcher LAUNCHED with a mode word carries it in its argv for the rest of
+# its life, so the liveness match has to allow one. Anchored on the repo alone
+# it did not, and every later question about that watcher was answered "none
+# running" — --status reported nothing while it polled, and a launch beside it
+# started a second watcher for the same repo (#30).
+start_live 'octocat/watch-mode' --takeover
+LIVE_MODE="$REPLY"
+run_watch_in "$GH_WATCH_STATE_DIR" 3 "watcher running for octocat/watch-mode (pid $LIVE_MODE)" \
+  'gh-watch: --status sees a watcher launched with --takeover' \
+  '' --status 'octocat/watch-mode'
+run_watch 3 'already running' \
+  'gh-watch: a launch beside a --takeover-launched watcher is refused (no second watcher)' \
+  'octocat/watch-mode' ''
+wassert 'gh-watch: the --takeover-launched watcher is still alive and holds its pidfile' \
+  bash -c "kill -0 $LIVE_MODE && test \"\$(cat '$(watch_pidfile 'octocat/watch-mode')' 2>/dev/null)\" = $LIVE_MODE"
 
 # SIGTERM must release the pidfile at once, not after the running `sleep 30`.
 start_live 'octocat/watch-term'
