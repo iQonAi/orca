@@ -2,7 +2,9 @@
 # Polls a GitHub repo's open issues/PRs every 30s; exits as soon as
 # issue/comment/label state changes. Exiting re-invokes the orchestrator
 # (harness task-notification), giving ~30s change detection under the
-# harness's 60s wakeup floor.
+# harness's 60s wakeup floor — ~35s on the poll that sees a difference, which
+# is re-fetched $GH_WATCH_CONFIRM_DELAY seconds later (default 5) and must
+# still differ from the baseline before the watcher exits.
 #
 # Usage: gh-watch.sh [--status|--takeover] [owner/repo]
 #   No repo argument: repo auto-detected from cwd via `gh repo view`.
@@ -230,6 +232,10 @@ snapshot() {
   gh api "repos/$repo/issues?state=open&per_page=50" \
     --jq '[.[] | {n: .number, u: .updated_at, l: [.labels[].name]}]' 2>/dev/null
 }
+# Seconds between a poll that differs from the baseline and the fetch that has
+# to differ from it too before the watcher exits. It is the whole cost of the
+# confirm, paid only on a differing poll; only the tests need to change it.
+confirm_delay="${GH_WATCH_CONFIRM_DELAY:-5}"
 base=$(snapshot) || base=""
 [ -z "$base" ] && {
   echo "baseline fetch failed for $repo"
@@ -244,8 +250,26 @@ for _ in $(seq 1 110); do
   cur=$(snapshot) || continue
   [ -z "$cur" ] && continue
   if [ "$cur" != "$base" ]; then
+    # CONFIRM. The listing sometimes answers `[]` for a repo whose issues are
+    # all still open, and exiting on that wakes the orchestrator for nothing.
+    # So take a second snapshot and exit only if it ALSO differs from the
+    # baseline. Against the BASELINE, not against $cur: activity that keeps
+    # moving between the two fetches is a real change, and comparing the two
+    # snapshots with each other would swallow exactly that case. `[]` gets no
+    # special case — a repo whose last open issue just closed answers it
+    # honestly, and the second fetch tells the two apart.
+    sleep "$confirm_delay" &
+    sleep_pid=$!
+    wait "$sleep_pid" 2>/dev/null
+    sleep_pid=""
+    confirm=$(snapshot) || confirm=""
+    # An empty confirming fetch failed; it did not confirm anything. Leave the
+    # baseline standing and poll on: the next poll sees the same difference and
+    # confirms it then, one poll late instead of wrong.
+    [ -z "$confirm" ] && continue
+    [ "$confirm" = "$base" ] && continue
     echo "CHANGE DETECTED at $(date +%H:%M:%S)"
-    echo "$cur"
+    echo "$confirm"
     exit 0
   fi
 done

@@ -27,7 +27,7 @@ the rest and reports a digest each cycle.
 | Path                          | What it is                                                                 |
 | ----------------------------- | -------------------------------------------------------------------------- |
 | `agents/orca.md`              | The orchestrator playbook — a Claude Code agent definition.                 |
-| `scripts/gh-watch.sh`         | Polls a repo's open issues every 30s; exits on any change. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection. Enforces one watcher per repo via a pidfile, with `--status` and `--takeover` modes. |
+| `scripts/gh-watch.sh`         | Polls a repo's open issues every 30s; exits on any change that a second fetch confirms. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection, ~35s on the poll that sees the change. Enforces one watcher per repo via a pidfile, with `--status` and `--takeover` modes. |
 | `hooks/orca-start-watcher.sh` | SessionStart hook. When the session is orca, it injects a directive telling orca to launch the watcher for the repo resolved from the git remote. No network calls; always exits 0. |
 | `bin/orca`                    | The launcher, and how a session is started. Runs the preflight checks — tools on `PATH`, the bot's token file and the login it authenticates, the bot's write access on the repository, the installed files and hook wiring, no second orca on the repository — then exports `GH_TOKEN` and the bot's git identity and execs `claude --agent orca`. `orca --check` runs the checks alone. |
 | `test/run.sh`                 | Hermetic test suite for the scripts, the installer and the launcher (stubbed `gh` and `claude`, temp HOMEs and state dirs). |
@@ -103,6 +103,7 @@ Environment overrides:
 | `ORCA_TOKEN_FILE` | `~/.config/orca/token` | (launcher) the bot's token file; `~/.config` follows `XDG_CONFIG_HOME` |
 | `ORCA_GIT_NAME` | the bot's login      | (launcher) git author and committer name orca commits with |
 | `ORCA_GIT_EMAIL` | `<id>+<login>@users.noreply.github.com` | (launcher) git author and committer email orca commits with |
+| `GH_WATCH_CONFIRM_DELAY` | `5`         | (watcher) seconds between a poll that differs from the baseline and the fetch that has to differ from it too before the watcher exits |
 
 Re-runs are idempotent. Anything replaced is backed up to
 `~/.orca-backups/<timestamp>/`.
@@ -406,6 +407,11 @@ this that really is code. It requests `?state=open&per_page=50` and does not
 paginate, so only the 50 most recent open items are watched; on a busier repo,
 changes below that cut-off are missed. And GitHub's `/issues` endpoint returns
 pull requests alongside issues, so the watcher sees PR activity as well.
+
+A poll that differs from the baseline costs one extra request: the endpoint
+occasionally answers `[]` for a repo whose issues are all still open, so the
+watcher re-fetches after `GH_WATCH_CONFIRM_DELAY` seconds and exits only if
+that answer differs from the baseline as well.
 
 The watcher makes roughly 120 requests per hour per repo (one poll every 30s),
 counting against the bot token's REST rate limit.
