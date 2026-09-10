@@ -1871,6 +1871,20 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: no origin remote is named with the --repo hint' \
     'fail: repo: not detected from the current directory (no origin remote); pass --repo owner/repo'
   orca_said 'launcher: the instance check is reported as not run without a repo' 'fail: instance: not checked (no repo)'
+  # a --repo value that is not owner/repo is refused before it can reach an
+  # API path: no permission call is made with it
+  : >"$L_CALLS"
+  ORCA_ENV=(ORCA_STUB_CALLS="$L_CALLS")
+  run_orca "$REPO_SSH" --check --repo ../x
+  wassert 'launcher: --repo ../x fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: --repo ../x is named as not owner/repo' "fail: repo: '../x' is not owner/repo"
+  wassert 'launcher: --repo ../x never reaches the permission API' bash -c "! grep -q collaborators '$L_CALLS'"
+  : >"$L_CALLS"
+  ORCA_ENV=(ORCA_STUB_CALLS="$L_CALLS")
+  run_orca "$REPO_SSH" --check --repo a/b/c
+  wassert 'launcher: --repo a/b/c fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: --repo a/b/c is named as not owner/repo' "fail: repo: 'a/b/c' is not owner/repo"
+  wassert 'launcher: --repo a/b/c never reaches the permission API' bash -c "! grep -q collaborators '$L_CALLS'"
 
   # 4. install: a dangling link is named with its target (the case from the
   # machine where a temp checkout vanished under the links), a missing file

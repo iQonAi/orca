@@ -189,8 +189,15 @@ if [ -n "$REPO" ]; then
 else
   repo=$(repo_from_origin) || repo=
 fi
+# The shape is checked before the value reaches an API path: exactly one
+# slash, neither side empty or a dot-name, and nothing GitHub would not put
+# in an owner or a repository name.
 case "$repo" in
   "") fail "repo: not detected from the current directory (no origin remote); pass --repo owner/repo" ;;
+  */*/* | */ | /* | ./* | ../* | */. | */.. | *[!A-Za-z0-9._/-]*)
+    fail "repo: '$repo' is not owner/repo"
+    repo=
+    ;;
   */*) ;;
   *)
     fail "repo: '$repo' is not owner/repo"
