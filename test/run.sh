@@ -165,16 +165,22 @@ mkdir -p "$STUB_BIN"
 # The LAST line repeats forever, so every poll after the scripted ones is
 # defined too. The cursor lives beside the file, which lets a case wait for a
 # given call to have happened rather than wait on the clock.
+#
+# The cursor counts CALLS, not lines: it keeps rising after the sequence is
+# exhausted (only the line it reads is clamped to the last line), so
+# `await_calls` can wait for a call past the scripted ones, and a case can tell
+# "fired on the first differing poll" from "fired a poll later" by the count.
 cat >"$STUB_BIN/gh" <<'STUB'
 #!/usr/bin/env bash
 seq_file="${GH_STUB_SEQ-}"
 if [ -n "$seq_file" ] && [ -f "$seq_file" ]; then
   n="$(cat "$seq_file.n" 2>/dev/null)"
   case "$n" in '' | *[!0-9]*) n=1 ;; esac
-  last="$(grep -c '' "$seq_file")"
-  [ "$n" -gt "$last" ] && n="$last"
   printf '%s\n' "$((n + 1))" >"$seq_file.n"
-  printf '%s' "$(sed -n "${n}p" "$seq_file")"
+  last="$(grep -c '' "$seq_file")"
+  line_no="$n"
+  [ "$line_no" -gt "$last" ] && line_no="$last"
+  printf '%s' "$(sed -n "${line_no}p" "$seq_file")"
   exit 0
 fi
 printf '%s' "${GH_STUB_OUT-[]}"
@@ -490,6 +496,8 @@ start_live_seq 'octocat/watch-flake' "$SEQ_FLAKE"
 LIVE_FLAKE="$REPLY"
 wassert 'gh-watch: a differing poll takes a confirming fetch (the flake case reached it)' \
   await_calls "$SEQ_FLAKE" 3
+wassert 'gh-watch: the stub cursor keeps counting past the scripted lines' \
+  await_calls "$SEQ_FLAKE" 5
 wassert 'gh-watch: a transient [] between two baselines does not stop the watcher' \
   kill -0 "$LIVE_FLAKE"
 wassert 'gh-watch: the watcher that saw the transient [] still holds its pidfile' \
