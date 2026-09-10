@@ -27,7 +27,7 @@ the rest and reports a digest each cycle.
 | Path                          | What it is                                                                 |
 | ----------------------------- | -------------------------------------------------------------------------- |
 | `agents/orca.md`              | The orchestrator playbook — a Claude Code agent definition.                 |
-| `scripts/gh-watch.sh`         | Polls a repo's open issues every 30s; exits on any change that a second fetch confirms. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection, ~35s on the poll that sees the change. Enforces one watcher per repo via a pidfile, with `--status` and `--takeover` modes. |
+| `scripts/gh-watch.sh`         | Polls a repo's open issues and PRs every 30s (`gh issue list` plus `gh pr list`); exits on any change that a second fetch confirms. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection, ~35s on the poll that sees the change. Enforces one watcher per repo via a pidfile, with `--status` and `--takeover` modes. |
 | `hooks/orca-start-watcher.sh` | SessionStart hook. When the session is orca, it injects a directive telling orca to launch the watcher for the repo resolved from the git remote. No network calls; always exits 0. |
 | `bin/orca`                    | The launcher, and how a session is started. Runs the preflight checks — tools on `PATH`, the bot's token file and the login it authenticates, the bot's write access on the repository, the installed files and hook wiring, no second orca on the repository — then exports `GH_TOKEN` and the bot's git identity and execs `claude --agent orca`. `orca --check` runs the checks alone. |
 | `test/run.sh`                 | Hermetic test suite for the scripts, the installer and the launcher (stubbed `gh` and `claude`, temp HOMEs and state dirs). |
@@ -103,7 +103,7 @@ Environment overrides:
 | `ORCA_TOKEN_FILE` | `~/.config/orca/token` | (launcher) the bot's token file; `~/.config` follows `XDG_CONFIG_HOME` |
 | `ORCA_GIT_NAME` | the bot's login      | (launcher) git author and committer name orca commits with |
 | `ORCA_GIT_EMAIL` | `<id>+<login>@users.noreply.github.com` | (launcher) git author and committer email orca commits with |
-| `GH_WATCH_CONFIRM_DELAY` | `5`         | (watcher) seconds between a poll that differs from the baseline and the fetch that has to differ from it too before the watcher exits |
+| `GH_WATCH_CONFIRM_DELAY` | `5`         | (watcher) seconds between a poll that differs from the baseline and the fetch that has to differ from it too before the watcher exits. Anything that is not a positive integer is reported on stderr and replaced by the default |
 
 Re-runs are idempotent. Anything replaced is backed up to
 `~/.orca-backups/<timestamp>/`.
@@ -386,8 +386,8 @@ at prose, not at code that enforces it.
 | ---------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------ |
 | Verify the token and read the bot's login and id                 | `bin/orca` — `gh api user`                                       | read user profile        |
 | Read the bot's permission on the repository                      | `bin/orca` — `gh api repos/<repo>/collaborators/<login>/permission` | read repo metadata    |
-| Poll open issues every 30s — number, `updated_at`, labels only   | `scripts/gh-watch.sh:201` — `gh api repos/<repo>/issues`         | read issues              |
-| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:54`, `agents/orca.md:24` — `gh repo view`   | read repo metadata       |
+| Poll open issues and PRs every 30s — number, `updatedAt`, labels only | `scripts/gh-watch.sh:266` — `gh issue list`, `gh pr list`    | read issues and PRs      |
+| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:65`, `agents/orca.md:24` — `gh repo view`   | read repo metadata       |
 | Read issue assignees and recent comments each cycle              | `agents/orca.md:53-54`                                           | read issues              |
 | Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:121-123`                                         | write issues             |
 | Push the worker branch                                           | `agents/orca.md:132`                                             | write repo contents      |
@@ -402,19 +402,29 @@ you want orca to manage, and no others. (A classic token would need `repo`,
 whose private-repo access covers all of the above, plus `workflow` for that
 same case; prefer the fine-grained one.)
 
-Two properties of the 30s poll are worth knowing, since it is the one piece of
-this that really is code. It requests `?state=open&per_page=50` and does not
-paginate, so only the 50 most recent open items are watched; on a busier repo,
-changes below that cut-off are missed. And GitHub's `/issues` endpoint returns
-pull requests alongside issues, so the watcher sees PR activity as well.
+Three properties of the 30s poll are worth knowing, since it is the one piece of
+this that really is code. Each poll runs `gh issue list` and `gh pr list`, both
+`--limit 50`, so only the 50 most recent open items of each kind are watched; on
+a busier repo, changes below that cut-off are missed. The two listings are
+separate calls because `gh issue list` excludes pull requests, and their results
+are concatenated and sorted, so listing order alone never looks like a change.
+And a listing that succeeds holding no items is taken at face value: a repo with
+nothing open yet is watched normally, and only a listing that FAILS makes the
+snapshot inconclusive.
 
-A poll that differs from the baseline costs one extra request: the endpoint
-occasionally answers `[]` for a repo whose issues are all still open, so the
-watcher re-fetches after `GH_WATCH_CONFIRM_DELAY` seconds and exits only if
-that answer differs from the baseline as well.
+These are the CLI's GraphQL-backed listings rather than the REST
+`repos/<repo>/issues` endpoint, which is what the watcher used to poll. That
+endpoint served inconsistent empty responses for minutes at a time — answering
+`[]` while `gh pr list` returned the PR that was open — and every one of them
+looked to the watcher like every issue closing at once
+([#32](https://github.com/iQonAi/orca/issues/32)).
 
-The watcher makes roughly 120 requests per hour per repo (one poll every 30s),
-counting against the bot token's REST rate limit.
+A poll that differs from the baseline costs one extra pair of requests: the
+watcher re-fetches after `GH_WATCH_CONFIRM_DELAY` seconds and exits only if that
+answer differs from the baseline as well.
+
+The watcher makes roughly 240 requests per hour per repo (two per poll, one poll
+every 30s), counting against the bot token's GraphQL rate limit.
 
 ### What gates a merge
 
