@@ -884,12 +884,17 @@ wassert 'gh-watch: a number added mid-run is ignored without a restart (still po
 wassert 'gh-watch: the watcher that took the mid-run set is still alive' \
   kill -0 "$LIVE_MID"
 
-# MERGE, THEN RELEASE. The change and the release can both land between two
-# polls, and the poll that sees them has a set that no longer holds the number
-# whose row moved. Filtering with the current set alone, that poll reports the
-# caller's own merge as a change; the union of the previous and current sets
-# covers it, and the raw snapshot becomes the next baseline, so the number is
-# compared normally from the next poll on.
+# RELEASING A NUMBER DOES NOT FIRE ON WHAT HAPPENED WHILE IT WAS IGNORED. The
+# change is already in the baseline by then, because the polls that ignored it
+# still slid the raw snapshot into it.
+#
+# The release waits for the fourth call, not the third: a call count says the
+# stub STARTED answering, not that the watcher finished the poll and read the
+# set, so releasing on the call that first serves the change races that poll's
+# own read. Waiting one call longer makes the ordering certain — the poll that
+# saw the change has completed, baseline and all. The union across the release
+# poll, which is the part that cannot be pinned down this way, is covered by
+# the declined-confirm case further down.
 SEQ_REL="$GH_TMP/seq-ign-release"
 printf '%s\n' '20 2026-09-09T10:00:00Z' '20 2026-09-09T10:00:00Z' \
   '20 2026-09-09T10:11:00Z' >"$SEQ_REL"
@@ -899,13 +904,13 @@ run_watch_in "$GH_WATCH_STATE_DIR" 0 'ignoring 20' \
   '' --ignore '20' "$IGN_REL_REPO"
 start_live_seq "$IGN_REL_REPO" "$SEQ_REL"
 LIVE_REL="$REPLY"
-wassert 'gh-watch: the release case is polling with the number ignored' \
-  await_calls "$SEQ_REL" 2
+wassert 'gh-watch: the release case polled the ignored change before the release' \
+  await_calls "$SEQ_REL" 4
 run_watch_in "$GH_WATCH_STATE_DIR" 0 "ignore set cleared for $IGN_REL_REPO" \
   'gh-watch: --ignore "" releases the number while the watcher is running' \
   '' --ignore '' "$IGN_REL_REPO"
 wassert 'gh-watch: releasing a number does not fire on the change made while it was ignored' \
-  await_calls "$SEQ_REL" 8
+  await_calls "$SEQ_REL" 10
 wassert 'gh-watch: the watcher that released a number is still alive' \
   kill -0 "$LIVE_REL"
 
@@ -934,7 +939,152 @@ wassert 'gh-watch: after a release, a later change on that number is reported' \
 wassert 'gh-watch: the released number never woke it on the change made while ignored' \
   bash -c "! grep -q '10:12:00Z' '$IGN_LATER_OUT'"
 
+# THE UNION WINDOW MUST OUTLIVE A POLL THAT DECLINED ITS CONFIRM. The window is
+# one poll wide, and it is spent by advancing the set that opened it — so it has
+# to advance in lockstep with the BASELINE it protects. A differing poll leaves
+# the baseline where it was (its two `continue`s: a failed confirming fetch, and
+# a confirm that agreed with the baseline). Advance the set on those polls too
+# and the window lapses over a baseline that never moved: release the number in
+# that gap and the change made while it was ignored fires, which is the wake
+# this whole feature removes, reached by the route the confirm exists to absorb.
+#
+# #50 flaps — every poll differs on it and every confirm puts it back, so no poll
+# reaches the branch that advances the baseline — while #20 holds the value it
+# was given while ignored. The release lands after the first declined confirm.
+SEQ_WIN_I="$GH_TMP/seq-ign-window-issues"
+printf '%s\n' '20 2026-09-09T11:00:00Z' '20 2026-09-09T11:05:00Z' >"$SEQ_WIN_I"
+SEQ_WIN_P="$GH_TMP/seq-ign-window-prs"
+printf '%s\n' '50 2026-09-09T11:00:00Z' '50 2026-09-09T11:01:00Z' \
+  '50 2026-09-09T11:00:00Z' '50 2026-09-09T11:02:00Z' \
+  '50 2026-09-09T11:00:00Z' >"$SEQ_WIN_P"
+IGN_WIN_REPO='octocat/watch-ign-window'
+IGN_WIN_OUT="$GH_TMP/ign-window.out"
+run_watch_in "$GH_WATCH_STATE_DIR" 0 'ignoring 20' \
+  'gh-watch: --ignore records the number released after a declined confirm' \
+  '' --ignore '20' "$IGN_WIN_REPO"
+start_live_seq_out "$IGN_WIN_REPO" "$SEQ_WIN_I" "$IGN_WIN_OUT" "$SEQ_WIN_P"
+LIVE_WIN="$REPLY"
+wassert 'gh-watch: the union-window case reached its first declined confirm' \
+  await_calls "$SEQ_WIN_I" 3
+run_watch_in "$GH_WATCH_STATE_DIR" 0 "ignore set cleared for $IGN_WIN_REPO" \
+  'gh-watch: --ignore "" releases the number between a declined confirm and the next poll' \
+  '' --ignore '' "$IGN_WIN_REPO"
+wassert 'gh-watch: the union window survives polls that declined their confirm (still polling)' \
+  await_calls "$SEQ_WIN_I" 9
+wassert 'gh-watch: the watcher whose release straddled a declined confirm is still alive' \
+  kill -0 "$LIVE_WIN"
+wassert 'gh-watch: a release after a declined confirm does not fire on the change made while ignored' \
+  bash -c "! grep -q 'CHANGE DETECTED' '$IGN_WIN_OUT'"
+
 unset GH_STUB_POLL
+
+# The value of --ignore is SPLIT, not EXPANDED. Splitting it with globbing left
+# on means what gets validated is not what was typed: in a directory holding
+# numeric filenames, `2*` becomes the numbers those files are named after and
+# passes a digits-only check that the typed value must fail.
+IGN_GLOB_DIR="$GH_TMP/globdir"
+mkdir -p "$IGN_GLOB_DIR"
+: >"$IGN_GLOB_DIR/20"
+: >"$IGN_GLOB_DIR/21"
+IGN_GLOB_OUT="$GH_TMP/ign-glob.out"
+(cd "$IGN_GLOB_DIR" && PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' \
+  "$BASH_BIN" "$WATCH_SCRIPT" --ignore '2*' 'octocat/watch-ign-glob' >"$IGN_GLOB_OUT" 2>&1)
+IGN_GLOB_RC=$?
+wassert 'gh-watch: --ignore does not glob its value against the working directory' \
+  test "$IGN_GLOB_RC" -eq 1
+wassert 'gh-watch: the rejected --ignore value is reported as the token that was typed' \
+  grep -qF "got '2*'" "$IGN_GLOB_OUT"
+wassert 'gh-watch: a globbing --ignore value wrote no set' \
+  test ! -e "$(watch_ignorefile 'octocat/watch-ign-glob')"
+
+# No ignore set means no filter at all, not a filter over an empty set: an
+# unignored repo must not pay for a machinery it is not using. The stub `awk`
+# records every call and then runs the real one, so the property is observable
+# without changing what the watcher computes.
+AWK_BIN="$GH_TMP/awkbin"
+mkdir -p "$AWK_BIN"
+cat >"$AWK_BIN/awk" <<'STUB'
+#!/usr/bin/env bash
+printf 'called\n' >>"${GH_STUB_AWK_LOG:-/dev/null}"
+exec /usr/bin/awk "$@"
+STUB
+chmod +x "$AWK_BIN/awk"
+SEQ_AWK="$GH_TMP/seq-ign-awk"
+printf '%s\n' '8 2026-09-09T12:00:00Z' '8 2026-09-09T12:01:00Z' \
+  '8 2026-09-09T12:01:00Z' >"$SEQ_AWK"
+AWK_LOG_OFF="$GH_TMP/awk-off.log"
+: >"$AWK_LOG_OFF"
+PATH="$AWK_BIN:$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="$SEQ_AWK" GH_STUB_SEQ_PR='' \
+  GH_STUB_AWK_LOG="$AWK_LOG_OFF" GH_WATCH_CONFIRM_DELAY=1 \
+  "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-ign-awkoff' >/dev/null 2>&1
+wassert 'gh-watch: a repo with no ignore set runs no filter at all' \
+  test ! -s "$AWK_LOG_OFF"
+AWK_LOG_ON="$GH_TMP/awk-on.log"
+: >"$AWK_LOG_ON"
+rm -f "$SEQ_AWK.n" # replay the same sequence from its first line
+run_watch_in "$GH_WATCH_STATE_DIR" 0 'ignoring 99' \
+  'gh-watch: --ignore records a set for the repo that must run the filter' \
+  '' --ignore '99' 'octocat/watch-ign-awkon'
+PATH="$AWK_BIN:$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="$SEQ_AWK" GH_STUB_SEQ_PR='' \
+  GH_STUB_AWK_LOG="$AWK_LOG_ON" GH_WATCH_CONFIRM_DELAY=1 \
+  "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-ign-awkon' >/dev/null 2>&1
+wassert 'gh-watch: a repo WITH an ignore set does run the filter (the probe works)' \
+  test -s "$AWK_LOG_ON"
+
+# `mv` onto a DIRECTORY succeeds by moving the temp file inside it, so the write
+# "succeeds" having recorded nothing and the caller is told its numbers are set.
+# The pidfile path already refuses this shape; the ignore path must too.
+IGN_DIR_FILE="$(watch_ignorefile 'octocat/watch-ign-dir')"
+mkdir -p "$IGN_DIR_FILE"
+run_watch_in "$GH_WATCH_STATE_DIR" 1 "could not write the ignore set $IGN_DIR_FILE" \
+  'gh-watch: a directory-shaped ignore file exits 1 instead of reporting a set it did not write' \
+  '' --ignore '9' 'octocat/watch-ign-dir'
+wassert 'gh-watch: the refused write left no temp file orphaned in the directory' \
+  test -z "$(ls -A "$IGN_DIR_FILE")"
+
+# An UNREADABLE set is not an empty set. The filter fails open — toward waking
+# the caller, which is the safe direction — but silently, and `--status` then
+# answers "no set" for "a set I cannot read". The operator sees wake-ups it
+# cannot explain and a probe that agrees nothing is ignored.
+if [[ "$(id -u)" -eq 0 ]]; then
+  printf 'skip: gh-watch: unreadable ignore set (root bypasses mode bits)\n'
+  printf 'skip: gh-watch: unreadable ignore set says so on stderr\n'
+  printf 'skip: gh-watch: unreadable ignore set still wakes the caller\n'
+else
+  IGN_UNREAD_REPO='octocat/watch-ign-unreadable'
+  run_watch_in "$GH_WATCH_STATE_DIR" 0 'ignoring 20' \
+    'gh-watch: --ignore records the set that is then made unreadable' \
+    '' --ignore '20' "$IGN_UNREAD_REPO"
+  chmod 000 "$(watch_ignorefile "$IGN_UNREAD_REPO")"
+  IGN_UNREAD_OUT="$GH_TMP/ign-unreadable.out"
+  IGN_UNREAD_ERR="$GH_TMP/ign-unreadable.err"
+  PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' "$BASH_BIN" "$WATCH_SCRIPT" \
+    --status "$IGN_UNREAD_REPO" >"$IGN_UNREAD_OUT" 2>"$IGN_UNREAD_ERR"
+  wassert 'gh-watch: unreadable ignore set says so on stderr' \
+    grep -q 'not readable' "$IGN_UNREAD_ERR"
+  wassert 'gh-watch: unreadable ignore set is not reported as a set' \
+    bash -c "! grep -q 'ignoring:' '$IGN_UNREAD_OUT'"
+  # ...and it fails OPEN: the number it names is watched, not silently dropped.
+  SEQ_UNREAD="$GH_TMP/seq-ign-unreadable"
+  printf '%s\n' '20 2026-09-09T13:00:00Z' '20 2026-09-09T13:01:00Z' \
+    '20 2026-09-09T13:01:00Z' >"$SEQ_UNREAD"
+  run_watch_seq 0 'CHANGE DETECTED' \
+    'gh-watch: an unreadable ignore set fails open — the change still fires' \
+    "$IGN_UNREAD_REPO" "$SEQ_UNREAD"
+  chmod 644 "$(watch_ignorefile "$IGN_UNREAD_REPO")"
+fi
+
+# The set is VALIDATED on write and taken on trust on read, so the read path
+# must not decode what it reads. `awk -v` runs its value through escape
+# processing, which turns `\062\060` into `20` — a set the file does not
+# contain, applied to a repo whose #20 then stops waking anyone.
+SEQ_ESC="$GH_TMP/seq-ign-escape"
+printf '%s\n' '20 2026-09-09T14:00:00Z' '20 2026-09-09T14:01:00Z' \
+  '20 2026-09-09T14:01:00Z' >"$SEQ_ESC"
+printf '%s\n' '\062\060' >"$(watch_ignorefile 'octocat/watch-ign-escape')"
+run_watch_seq 0 'CHANGE DETECTED' \
+  'gh-watch: a backslash escape in the ignore file is not decoded into a number' \
+  'octocat/watch-ign-escape' "$SEQ_ESC"
 
 reap_live_watchers
 unset GH_WATCH_STATE_DIR

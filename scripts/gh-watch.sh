@@ -126,7 +126,24 @@ ignore_file="$state_dir/$repo_slug.ignore"
 
 # The set as written, or "" when there is none. A missing file is the ordinary
 # state (nobody has ignored anything), not an error.
+#
+# A set that EXISTS but cannot be read is a third state, and it must not look
+# like the first. Reading it as "" fails open — toward waking the caller, which
+# is the safe direction — but silently: the watcher stops filtering, and
+# --status, the one probe the playbook runs every cycle, answers "no set" for
+# "a set I cannot read". So say it, on stderr, once per episode: this is read
+# every poll, and 110 copies of one line is the noise the snapshot's own error
+# handling exists to avoid.
+ignore_unreadable=0
 read_ignore() {
+  if [ -e "$ignore_file" ] && { [ ! -f "$ignore_file" ] || [ ! -r "$ignore_file" ]; }; then
+    if [ "$ignore_unreadable" != 1 ]; then
+      echo "ignore set $ignore_file is not readable; ignoring nothing" >&2
+      ignore_unreadable=1
+    fi
+    return 0
+  fi
+  ignore_unreadable=0
   cat "$ignore_file" 2>/dev/null
   return 0
 }
@@ -134,13 +151,22 @@ read_ignore() {
 # Drop every row of snapshot $1 whose number is in the space-separated set $2.
 # `snapshot()` emits `number updatedAt labels`, so the number is the first
 # field and awk's default splitting finds it with no new dependency.
+#
+# The set reaches awk through the ENVIRONMENT, not through `-v`. `-v` runs its
+# value through escape processing, so a file holding `\062\060` would make awk
+# drop #20 — a number the set does not contain. The write path validates
+# digits; the read path takes whatever is on disk, so it is the read path that
+# must not decode it.
 ignore_filter() {
   [ -n "$2" ] || {
     printf '%s' "$1"
     return 0
   }
-  printf '%s\n' "$1" | awk -v ign="$2" '
-    BEGIN { n = split(ign, a, /[ \t\n]+/); for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1 }
+  printf '%s\n' "$1" | GH_WATCH_IGNORE_SET="$2" awk '
+    BEGIN {
+      n = split(ENVIRON["GH_WATCH_IGNORE_SET"], a, /[ \t\n]+/)
+      for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1
+    }
     !($1 in drop)'
 }
 
@@ -211,7 +237,13 @@ if [ "$mode" = ignore ]; then
   # command, and in between its own workers wake it.
   ignore_set=""
   # Word splitting is the point here: the value is a list of numbers in one
-  # argument, spelled the way a caller would say it.
+  # argument, spelled the way a caller would say it. PATHNAME EXPANSION is not,
+  # and `set -f` turns it off for the split: left on, a value holding `*` is
+  # expanded against the working directory, so what gets validated is not what
+  # was typed — and in a directory of numeric filenames the expansion passes
+  # the digits-only check that the typed value must fail. Globbing stays off
+  # for the rest of this branch, which exits a few lines below.
+  set -f
   # shellcheck disable=SC2086
   for token in $ignore_arg; do
     case "$token" in
@@ -222,6 +254,17 @@ if [ "$mode" = ignore ]; then
     esac
     ignore_set="${ignore_set:+$ignore_set }$token"
   done
+  set +f
+  # `mv` onto a DIRECTORY succeeds by moving the temp file INSIDE it, so without
+  # this guard the write reports success, records nothing, orphans the temp file
+  # in there, and leaves `read_ignore` answering "" for good — the caller is told
+  # its numbers are ignored while the watcher goes on waking it on its own work.
+  # The pidfile path refuses this shape already (its write fails on a directory);
+  # this one has to ask.
+  [ -d "$ignore_file" ] && {
+    echo "could not write the ignore set $ignore_file for $repo (it is a directory)"
+    exit 1
+  }
   # Atomic: a watcher polls this file every 30s, and a truncated read is a set
   # that is briefly missing numbers the caller owns — which fires. Writing a
   # temp file in the same directory and renaming it means every read sees
@@ -445,8 +488,16 @@ for _ in $(seq 1 110); do
   # caller's own merge as news. The union covers the release poll, and the raw
   # snapshot below becomes the next baseline, so from the next poll on the
   # number is compared like any other.
-  ignore_union="$ignore_prev $ignore_now"
-  ignore_prev="$ignore_now"
+  #
+  # It is SYMMETRIC, and that is deliberate: it also swallows a change that
+  # landed just BEFORE the number was claimed. The caller claims a number when
+  # it is about to work on it and reads that issue or PR before acting, so a
+  # change dropped on the claiming poll is one it is about to read anyway.
+  #
+  # No separator when a side is empty: an unignored repo would otherwise union
+  # to a single space, which is not an empty set, and every poll would run the
+  # filter over a set that drops nothing.
+  ignore_union="${ignore_prev:+$ignore_prev }$ignore_now"
   base_seen="$(ignore_filter "$base" "$ignore_union")"
   if [ "$(ignore_filter "$cur" "$ignore_union")" != "$base_seen" ]; then
     # CONFIRM. Defence in depth against any transient the listings can still
@@ -479,7 +530,16 @@ for _ in $(seq 1 110); do
   # nothing (the two are equal here by definition). With one, it is what stops a
   # change made while a number was ignored from firing the moment it is
   # released: that change is already in the baseline it is compared against.
+  #
+  # The union window closes HERE, beside the baseline it protects, and nowhere
+  # else. Advancing it on every poll instead spends it on the polls that leave
+  # the baseline standing — a failed confirming fetch, or a confirm that agreed
+  # with the baseline — and the window then lapses over a baseline that never
+  # moved. Release the number in that gap and the change made while it was
+  # ignored fires. Not advancing on those polls only widens the union, which is
+  # the safe direction: it ignores more, never less.
   base="$cur"
+  ignore_prev="$ignore_now"
 done
 echo "no change in ~55min; restart me"
 exit 0

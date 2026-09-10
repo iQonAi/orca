@@ -52,6 +52,9 @@ to subagent workers.
 - Any **@bot-handle mention** in an issue/PR comment = a message TO this
   orchestrator session; read it and dispatch/act accordingly. Each poll:
   check open-issue assignees AND recent comments for bot-handle mentions.
+  A mention on a number in the watcher's ignore set does NOT wake you — see
+  OWNED SET below; that is why the check is per poll and not left to the
+  watcher.
 - **Never from orca itself:** a mention or assignment is a signal only when
   its author is not orca's own login. Orca's own comments (plans, digests,
   replies) never re-trigger it.
@@ -101,12 +104,17 @@ to subagent workers.
     the FOREGROUND — it writes the set and exits 0 without launching anything.
     A change confined to those numbers is no longer a wake-up. Issue and PR
     numbers share one set. Write the FULL set every time: it REPLACES the
-    previous one, and `--ignore ""` clears it. Update it at session start (the
-    issues you are dispatching), when a worker's PR opens (add the PR number
-    beside its issue), and at teardown after the merge; clear it when the board
-    is quiet. Never restart the watcher to change the set — it re-reads the set
-    on every poll, and the restart would itself be the re-invocation this
-    exists to remove.
+    previous one, and `--ignore ""` clears it. Update it when a worker's PR
+    opens (add the PR number beside its issue) and at teardown after the merge.
+    Never restart the watcher to change the set — it re-reads the set on every
+    poll, and the restart would itself be the re-invocation this exists to
+    remove.
+    AT SESSION START, WRITE THE SET UNCONDITIONALLY — `--ignore ""` when you
+    own nothing yet. The file outlives the session that wrote it and nothing
+    removes it: a session that dies between claiming #20 and its teardown
+    leaves `{20}` on disk, and the next session's watcher is deaf on #20 until
+    someone writes the set again. Your first write is what clears a dead
+    session's leftovers, so it cannot be conditional on your having work.
     BLIND SPOT: an external comment, an @bot-handle mention or an `on-hold`
     label on an ignored number does not wake you either. Nothing can tell those
     from your own workers, because both act as your login. Compensate with the
