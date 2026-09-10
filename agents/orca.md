@@ -73,11 +73,11 @@ to subagent workers.
   expected; decay gradually (60 → 180 → 600) as activity quiets; ~600s
   baseline during worker waits; up to ~1800s when fully idle.
 - 30s DETECTION: the wakeup floor is 60s, so a background watcher
-  (`~/.claude/scripts/gh-watch.sh <owner/repo>`, run_in_background) polls
-  the repo every 30s and EXITS on any issue/comment/label change — its exit
+  (`~/.claude/scripts/gh-watch.sh <owner/repo>`, run_in_background) polls the
+  repo's open issues and PRs every 30s and EXITS on any issue/comment/label
+  change a second fetch confirms — ~35s on the poll that sees one. Its exit
   re-invokes the orchestrator immediately. It self-expires after ~55min of
-  quiet; RESTART it each time it exits (change or expiry). Wakeups stay as
-  the long fallback heartbeat.
+  quiet; RESTART it on every exit (change or expiry). Wakeups stay as fallback.
   - AUTOSTART: the `orca-start-watcher.sh` SessionStart hook injects a
     directive on every session start/resume (only for the orca main session)
     reminding you to bring the watcher up for the detected repo. Only the

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Polls a GitHub repo's open issues/PRs every 30s; exits as soon as
-# issue/comment/label state changes. Exiting re-invokes the orchestrator
-# (harness task-notification), giving ~30s change detection under the
-# harness's 60s wakeup floor.
+# Polls a GitHub repo's open issues and PRs every 30s (`gh issue list` plus
+# `gh pr list`); exits as soon as issue/comment/label state changes. Exiting
+# re-invokes the orchestrator (harness task-notification), giving ~30s change
+# detection under the harness's 60s wakeup floor — ~35s on the poll that sees a
+# difference, which is re-fetched $GH_WATCH_CONFIRM_DELAY seconds later
+# (default 5) and must still differ from the baseline before the watcher exits.
 #
 # Usage: gh-watch.sh [--status|--takeover] [owner/repo]
 #   No repo argument: repo auto-detected from cwd via `gh repo view`.
@@ -78,20 +80,45 @@ if [ "$mode" != status ]; then
 fi
 pidfile="$state_dir/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_').pid"
 
+# The repo goes into an ERE below, so escape its regex metacharacters first.
+# A repo name may legally contain `.`, and an unescaped `.` is "any character":
+# the pattern built for `octocat/watch.dot` would match a watcher for
+# `octocat/watchxdot`, and this repo's pidfile would then be honoured for a
+# watcher of another repo — refusing the launch and leaving this repo unwatched.
+repo_re="$(printf '%s' "$repo" | sed 's/[]\.[*^$+?(){}|]/\\&/g')"
+
 # Is $1 a live watcher FOR THIS REPO? (pid alive is not enough: pids get
-# recycled.) The match is anchored on the script name AND the repo argument,
-# because an unanchored `gh-watch` substring test matches far more than real
-# watchers — editors, greps, and above all the harness's own wrapper shell,
-# which is the classic self-match bug. The trailing alternative with no repo
-# argument covers a watcher launched with the repo auto-detected from cwd:
-# only such a watcher for THIS repo can have written this repo's pidfile.
+# recycled.) The match is anchored on the script name and on the end of the
+# command line, because an unanchored `gh-watch` substring test matches far
+# more than real watchers — editors, greps, and above all the harness's own
+# wrapper shell, which is the classic self-match bug. The trailing alternative
+# with no repo argument covers a watcher launched with the repo auto-detected
+# from cwd: only such a watcher for THIS repo can have written this repo's
+# pidfile.
+#
+# Mode words are allowed generically, not one by one: a watcher launched as
+# `gh-watch.sh --takeover <repo>` keeps that word in its argv for the rest of
+# its life, and matching only the bare form answered "none running" about a
+# watcher that was polling (#30). Two limits on that are worth stating plainly:
+#
+#   - The match set really did grow. `gh-watch.sh --status`, a wrapper
+#     `sh -c '... gh-watch.sh --status'` and `vim scripts/gh-watch.sh --nofork`
+#     all match now, and --status runs are frequent (the playbook calls one per
+#     cycle). What keeps this safe is NOT the anchoring: it is that
+#     live_watcher() is only ever asked about a pid read from THIS repo's own
+#     pidfile, so a wrong answer needs that pid to have been recycled onto one
+#     of those processes.
+#   - "A mode word added later needs no second fix here" holds only for a
+#     VALUELESS long flag. `--interval 60`, `--delay=5` and every short flag
+#     fail to match, and would each need this pattern widened again.
+#
 # `-ww` is required — BSD `ps` truncates the command column to terminal width.
 live_watcher() {
   [ -n "${1:-}" ] || return 1
   case "$1" in '' | *[!0-9]*) return 1 ;; esac
   kill -0 "$1" 2>/dev/null || return 1
   ps -ww -o args= -p "$1" 2>/dev/null |
-    grep -qE "gh-watch\.sh([[:space:]]+$repo)?[[:space:]]*$"
+    grep -qE "gh-watch\.sh([[:space:]]+--[A-Za-z-]+)*([[:space:]]+$repo_re)?[[:space:]]*$"
 }
 
 if [ "$mode" = status ]; then
@@ -221,12 +248,65 @@ trap 'release' EXIT
 # Signals exit 0, not 130/143: the exit-code contract is {0,1,3}, and a watcher
 # stopped by a signal is one the caller should restart — which is what 0 means.
 trap 'release; exit 0' INT TERM HUP
+# Built from the GraphQL-backed CLI listings, NOT from `repos/<repo>/issues`.
+# That REST listing served inconsistent EMPTY responses for minutes at a time
+# from a bad replica — it answered `[]` while `gh pr list` returned the PR that
+# was open — and a watcher reading one of those as "everything just closed"
+# reports a change that never happened (#32). `gh issue list` and `gh pr list`
+# stayed consistent through every observed flake window. They take two calls
+# because `gh issue list` excludes pull requests, where the REST listing
+# included them; the concatenation is sorted so listing order alone can never
+# look like a change.
+#
+# EMPTY IS NOT FAILURE. A listing that succeeds with no items is the truth about
+# a quiet repo — zero open issues alongside one open PR is an ordinary state.
+# Only a non-zero exit means "no answer", and only that returns non-zero here.
+# Conflating the two would leave the watcher deaf on exactly the repos where a
+# first issue arriving is the thing worth waking up for.
 snapshot() {
-  gh api "repos/$repo/issues?state=open&per_page=50" \
-    --jq '[.[] | {n: .number, u: .updated_at, l: [.labels[].name]}]' 2>/dev/null
+  local issues prs
+  # stderr is dropped, as it was on the call this replaced: the exit status
+  # already says "no answer", and a listing that is failing fails on every poll
+  # — 110 copies of the same gh error in the output the orchestrator reads. A
+  # failure that is not transient is caught by the baseline, which does report.
+  issues=$(gh issue list --repo "$repo" --state open --limit 50 \
+    --json number,updatedAt,labels \
+    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"' 2>/dev/null) || return 1
+  prs=$(gh pr list --repo "$repo" --state open --limit 50 \
+    --json number,updatedAt,labels \
+    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"' 2>/dev/null) || return 1
+  {
+    [ -n "$issues" ] && printf '%s\n' "$issues"
+    [ -n "$prs" ] && printf '%s\n' "$prs"
+  } | sort
 }
-base=$(snapshot) || base=""
-[ -z "$base" ] && {
+# Seconds between a poll that differs from the baseline and the fetch that has
+# to differ from it too before the watcher exits. It is the whole cost of the
+# confirm, paid only on a differing poll; only the tests need to change it.
+# Validated here rather than at the point of use: an unusable value reaches
+# `sleep`, which fails, prints its usage into the output the orchestrator reads,
+# and leaves no gap between the two fetches at all — the confirm degrades to
+# nothing, silently, in the one direction that matters.
+# Two conditions, because the shape alone is not the value: it must be all
+# digits, AND at least one of them must be non-zero. `00` and `000` are as
+# digits-only as `30` is, and each one sleeps for exactly no time — the same
+# collapse a non-numeric value causes, reached by a value that looks well
+# formed. Asking for a non-zero digit rejects every spelling of zero at once,
+# and still accepts `10`, which "holds no zero" would refuse.
+confirm_delay="${GH_WATCH_CONFIRM_DELAY:-5}"
+confirm_delay_ok=0
+case "$confirm_delay" in
+  *[!0-9]*) ;;
+  *[1-9]*) confirm_delay_ok=1 ;;
+esac
+if [ "$confirm_delay_ok" != 1 ]; then
+  echo "GH_WATCH_CONFIRM_DELAY '$confirm_delay' is not a positive integer; using 5" >&2
+  confirm_delay=5
+fi
+# A FAILED baseline is fatal; an EMPTY one is not. The watcher has nothing to
+# compare against if it never got an answer, but "" is a perfectly good baseline
+# for a repo with nothing open yet.
+base=$(snapshot) || {
   echo "baseline fetch failed for $repo"
   exit 1
 }
@@ -236,11 +316,26 @@ for _ in $(seq 1 110); do
   sleep_pid=$!
   wait "$sleep_pid" 2>/dev/null
   sleep_pid=""
+  # Only a failed fetch is skipped. An empty answer is a real snapshot: it says
+  # the repo has nothing open, which differs from a baseline that had something.
   cur=$(snapshot) || continue
-  [ -z "$cur" ] && continue
   if [ "$cur" != "$base" ]; then
+    # CONFIRM. Defence in depth against any transient the listings can still
+    # produce: take a second snapshot and exit only if it ALSO differs from the
+    # baseline. Against the BASELINE, not against $cur: activity that keeps
+    # moving between the two fetches is a real change, and comparing the two
+    # snapshots with each other would swallow exactly that case.
+    sleep "$confirm_delay" &
+    sleep_pid=$!
+    wait "$sleep_pid" 2>/dev/null
+    sleep_pid=""
+    # A FAILED confirming fetch confirmed nothing. Leave the baseline standing
+    # and poll on: the next poll sees the same difference and confirms it then,
+    # one poll late instead of wrong.
+    confirm=$(snapshot) || continue
+    [ "$confirm" = "$base" ] && continue
     echo "CHANGE DETECTED at $(date +%H:%M:%S)"
-    echo "$cur"
+    echo "$confirm"
     exit 0
   fi
 done
