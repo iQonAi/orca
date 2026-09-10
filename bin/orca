@@ -159,7 +159,15 @@ if [ -n "$token" ]; then
   if out=$(GH_TOKEN="$token" gh api user --jq '"\(.login) \(.id)"' 2>&1) && [ -n "$out" ]; then
     login=${out%% *}
     uid=${out#* }
-    ok "running as $login"
+    # stderr is merged into $out, so a warning gh prints beside a success
+    # would land in the git identity: a non-numeric id is refused
+    case "$uid" in
+      '' | *[!0-9]*)
+        fail "identity: unexpected gh api user output"
+        login=
+        ;;
+      *) ok "running as $login" ;;
+    esac
   else
     fail "identity: gh api user failed with the token in $TOKEN_FILE: $(first_line "$out")"
   fi

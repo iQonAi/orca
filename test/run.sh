@@ -1670,6 +1670,7 @@ cat >"$L_STUBS/gh" <<'STUB'
 # Answers `api user` and `api repos/<o>/<r>/collaborators/orca-bot/permission`
 # (the permission from ORCA_STUB_PERM, default admin), applying --jq with real
 # jq. ORCA_STUB_CALLS names a file each call's arguments are appended to.
+# ORCA_STUB_WARN is printed on stderr beside a successful `api user`.
 jq_expr=
 args=()
 while [ $# -gt 0 ]; do
@@ -1688,7 +1689,10 @@ if [ "${GH_TOKEN-}" != "${ORCA_STUB_TOKEN-}" ]; then
   exit 1
 fi
 case "${args[0]-} ${args[1]-}" in
-  'api user') body='{"login":"orca-bot","id":424242}' ;;
+  'api user')
+    body='{"login":"orca-bot","id":424242}'
+    [ -n "${ORCA_STUB_WARN:-}" ] && printf '%s\n' "$ORCA_STUB_WARN" >&2
+    ;;
   api\ repos/*/collaborators/orca-bot/permission) body="{\"permission\":\"${ORCA_STUB_PERM:-admin}\"}" ;;
   *)
     echo "stub gh: unexpected call: ${args[*]}" >&2
@@ -1864,6 +1868,17 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
     "fail: identity: gh api user failed with the token in $L_TOKEN: gh: HTTP 401: Bad credentials"
   orca_said 'launcher: the permission check is reported as not run without a login' \
     "fail: repo: octocat/hello-world; the bot's permission was not checked (identity check failed)"
+  # gh's stderr is merged into the parsed output: a warning printed beside a
+  # success must not become the git identity
+  ORCA_ENV=(ORCA_STUB_WARN='! Warning: this token expires in 3 days')
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a gh warning beside a successful api user fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a gh warning beside a successful api user is named' 'fail: identity: unexpected gh api user output'
+  orca_not_said 'launcher: a gh warning beside a successful api user names no login' 'ok: running as'
+  ORCA_ENV=(ORCA_STUB_WARN='! Warning: this token expires in 3 days')
+  run_orca "$REPO_SSH"
+  wassert 'launcher: a gh warning beside a successful api user refuses the launch' test "$ORCA_RC" -eq 1
+  orca_not_said 'launcher: a gh warning beside a successful api user reaches no git identity' 'GIT_AUTHOR_EMAIL='
 
   # 3. repo: the permission must be write or better; no origin is named
   ORCA_ENV=(ORCA_STUB_PERM=read)
