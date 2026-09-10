@@ -1812,6 +1812,9 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   wassert 'launcher: --repo exits 0' test "$ORCA_RC" -eq 0
   orca_said 'launcher: --repo overrides the detected repo' 'ok: repo: octocat/elsewhere (orca-bot has admin access)'
   orca_said 'launcher: --repo is the repo the instance check uses' 'ok: instance: no other orca running for octocat/elsewhere'
+  run_orca "$REPO_SSH" --check --repo=octocat/elsewhere
+  wassert 'launcher: --repo=owner/repo exits 0' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: --repo=owner/repo overrides the detected repo' 'ok: repo: octocat/elsewhere (orca-bot has admin access)'
 
   # 1. tools: a missing one is named, and every other check still runs
   ORCA_ENV=(PATH="$L_NOCLAUDE:$L_SYS")
@@ -1852,6 +1855,20 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   wassert 'launcher: a 0400 token file passes --check' test "$ORCA_RC" -eq 0
   orca_said 'launcher: a 0400 token file is reported with its own mode' "ok: token: $L_TOK400 (mode 0400)"
   orca_said 'launcher: a 0400 token file is used to reach GitHub' 'ok: running as orca-bot'
+  # a symlinked token file is judged by the file it points at
+  L_TOKLINK="$L_TMP/token-link"
+  ln -s "$L_TOKEN" "$L_TOKLINK"
+  ORCA_ENV=(ORCA_TOKEN_FILE="$L_TOKLINK")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a symlink to a 0600 token file passes --check' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: a symlink to a 0600 token file is reported with the target mode' "ok: token: $L_TOKLINK (mode 0600)"
+  L_TOKLINK644="$L_TMP/token-link-644"
+  ln -s "$L_TOK644" "$L_TOKLINK644"
+  ORCA_ENV=(ORCA_TOKEN_FILE="$L_TOKLINK644")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a symlink to a 0644 token file fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a symlink to a 0644 token file is refused with the target mode' \
+    "fail: token: $L_TOKLINK644 is mode 644, not 0600"
   L_TOKEMPTY="$L_TMP/token-empty"
   : >"$L_TOKEMPTY"
   chmod 600 "$L_TOKEMPTY"
@@ -1984,6 +2001,11 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: a launch with no extra arguments execs claude --agent orca alone' \
     'stub claude argv: [--agent] [orca]'$'\n'
   wait_record_gone
+  run_orca "$REPO_SSH" -- --check
+  wassert 'launcher: -- ends the launcher options (exit 0)' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: a --check after -- is passed through to claude' 'stub claude argv: [--agent] [orca] [--check]'
+  orca_not_said 'launcher: a --check after -- is not a check run' 'all checks passed'
+  wait_record_gone
   ORCA_ENV=(ORCA_GIT_NAME='Orca Bot' ORCA_GIT_EMAIL=orca@example.invalid)
   run_orca "$REPO_SSH"
   orca_said 'launcher: ORCA_GIT_NAME overrides the git name' 'GIT_COMMITTER_NAME=Orca Bot'
@@ -2054,6 +2076,32 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   wassert 'launcher: a launch over a stale record proceeds' test "$ORCA_RC" -eq 0
   orca_said 'launcher: a launch over a stale record execs claude' 'stub claude argv: [--agent] [orca]'
   wassert 'launcher: the record written over a stale one is removed after exit' wait_record_gone
+
+  # XDG_CONFIG_HOME elsewhere: the token is read from there, --check creates
+  # nothing there, and a launch writes its record there and not under HOME
+  L_XDG="$L_TMP/xdg"
+  mkdir -p "$L_XDG/orca"
+  printf 'ghp_stubtoken\n' >"$L_XDG/orca/token"
+  chmod 600 "$L_XDG/orca/token"
+  ORCA_ENV=(XDG_CONFIG_HOME="$L_XDG")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: XDG_CONFIG_HOME elsewhere passes --check with the token there' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: XDG_CONFIG_HOME elsewhere reads the token from there' "ok: token: $L_XDG/orca/token (mode 0600)"
+  wassert 'launcher: --check under XDG_CONFIG_HOME elsewhere creates nothing there' test ! -e "$L_XDG/orca/sessions"
+  L_XDG_RECORD="$L_XDG/orca/sessions/octocat_hello-world"
+  (cd "$REPO_SSH" && exec env -i HOME="$L_HOME" XDG_CONFIG_HOME="$L_XDG" ORCA_BIN="$L_OBIN" PATH="$L_PATH" \
+    ORCA_STUB_TOKEN=ghp_stubtoken ORCA_STUB_HOLD=60 sh "$LAUNCHER") >"$L_TMP/held-xdg.out" 2>&1 &
+  L_HELD_XDG=$!
+  disown "$L_HELD_XDG" 2>/dev/null || true
+  LIVE_ORCAS+=("$L_HELD_XDG")
+  for _ in $(seq 1 40); do
+    [ "$(cat "$L_XDG_RECORD" 2>/dev/null)" = "$L_HELD_XDG" ] && break
+    sleep 0.25
+  done
+  wassert 'launcher: a launch under XDG_CONFIG_HOME elsewhere writes its record there' \
+    test "$(cat "$L_XDG_RECORD" 2>/dev/null)" = "$L_HELD_XDG"
+  wassert 'launcher: a launch under XDG_CONFIG_HOME elsewhere writes no record under HOME' test ! -e "$L_RECORD"
+  kill -TERM "$L_HELD_XDG" 2>/dev/null
 
   # usage
   run_orca "$REPO_SSH" --help
