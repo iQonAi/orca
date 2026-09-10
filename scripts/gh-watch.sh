@@ -6,14 +6,34 @@
 # difference, which is re-fetched $GH_WATCH_CONFIRM_DELAY seconds later
 # (default 5) and must still differ from the baseline before the watcher exits.
 #
-# Usage: gh-watch.sh [--status|--takeover] [owner/repo]
+# Usage: gh-watch.sh [--status|--takeover|--ignore <numbers>] [owner/repo]
 #   No repo argument: repo auto-detected from cwd via `gh repo view`.
 #   --status    report whether a live watcher holds this repo, then exit.
 #               Never launches, never writes state — safe to call every cycle.
+#               Also reports the ignore set, when the repo has one.
 #   --takeover  terminate the live watcher holding this repo (if any), then
 #               become the watcher in its place. For an incumbent that is not
 #               the caller's own job: its exit notifies whoever launched it,
 #               not the caller, so leaving it in place means blind polling.
+#   --ignore <numbers>
+#               record the issue/PR numbers the CALLER currently owns, then
+#               exit 0 without launching anything. A change confined to those
+#               numbers is not a wake-up, so the caller's own workers pushing
+#               commits, opening PRs and posting review comments no longer
+#               re-invoke it to report work it did itself. `--ignore ""`
+#               clears the set. The numbers are ONE namespace over issues and
+#               PRs, because an owner owns an issue and its PR together.
+#               The set is re-read on EVERY poll, so it changes without
+#               restarting the watcher — and a restart is itself the
+#               re-invocation this exists to remove. A live watcher is not
+#               required: the set is state, and a watcher started later reads
+#               it.
+#               BLIND SPOT, by construction: an external comment, an
+#               @-mention or an `on-hold` label on an ignored number does not
+#               wake the watcher either. Nothing here can tell those from the
+#               caller's own work — same token, same actor — so the caller
+#               compensates: poll faster while comments flow, and re-read your
+#               own PRs before merging them.
 #
 # SINGLE-INSTANCE PER REPO. Idempotency is this script's OWN invariant,
 # not the caller's: it takes a per-repo pidfile before doing any work. Callers
@@ -25,9 +45,11 @@
 # Exit codes (every mode uses the same three, and no others):
 #   0  watch mode: ran, then a change was detected OR the ~55min quiet expiry
 #      hit, OR a signal (INT/TERM/HUP) stopped it. --status: no live watcher
-#      holds this repo. In every case: the caller SHOULD (re)start a watcher.
+#      holds this repo. --ignore: the set was written. In every case except
+#      --ignore: the caller SHOULD (re)start a watcher.
 #   1  could not start (no repo resolved, unusable state dir, pidfile not
-#      takeable, baseline fetch failed) -> fix the cause, do not spin.
+#      takeable, baseline fetch failed), or --ignore was given something that
+#      is not a list of numbers -> fix the cause, do not spin.
 #   3  a watcher is ALREADY running for this repo. From a launch: this
 #      invocation did nothing, so relaunching identically just returns 3
 #      again. From --status: the incumbent's pid is printed. If the incumbent
@@ -38,7 +60,8 @@
 #
 # State: $GH_WATCH_STATE_DIR, else $XDG_RUNTIME_DIR/gh-watch-<uid>, else
 # $TMPDIR (or /tmp)/gh-watch-<uid>. One pidfile per repo, so different repos
-# watch concurrently. NEVER ~/.claude/jobs/ — the harness reserves that.
+# watch concurrently, and one ignore file per repo beside it. NEVER
+# ~/.claude/jobs/ — the harness reserves that.
 # A stale pidfile (killed/crashed watcher) cannot wedge the script: the
 # recorded pid must be alive AND still be a gh-watch for THIS repo to be
 # honoured, otherwise the file is reclaimed. Reclaiming races (two launches
@@ -46,7 +69,9 @@
 # the acquire block below.
 set -u
 
+usage="usage: gh-watch.sh [--status|--takeover|--ignore <numbers>] [owner/repo]"
 mode=watch
+ignore_arg=""
 case "${1:-}" in
   --status)
     mode=status
@@ -56,8 +81,22 @@ case "${1:-}" in
     mode=takeover
     shift
     ;;
+  --ignore)
+    mode=ignore
+    # The value is REQUIRED and may be EMPTY — `--ignore ""` is how the set is
+    # cleared — so its absence is a question about the argument count, not
+    # about the string. Testing -z here would silently turn `--ignore` alone
+    # into "clear", and a caller that meant to name its numbers and mistyped
+    # the flag would un-ignore everything it owns instead of being told.
+    [ "$#" -ge 2 ] || {
+      echo "$usage"
+      exit 1
+    }
+    ignore_arg="$2"
+    shift 2
+    ;;
   --*)
-    echo "usage: gh-watch.sh [--status|--takeover] [owner/repo]"
+    echo "$usage"
     exit 1
     ;;
 esac
@@ -78,7 +117,32 @@ if [ "$mode" != status ]; then
     exit 1
   }
 fi
-pidfile="$state_dir/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_').pid"
+repo_slug="$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_')"
+pidfile="$state_dir/$repo_slug.pid"
+# The ignore set lives beside the pidfile, per repo, and OUTLIVES any single
+# watcher: the caller writes it once and every watcher for the repo — this one,
+# and the one that replaces it after an exit — reads the same file.
+ignore_file="$state_dir/$repo_slug.ignore"
+
+# The set as written, or "" when there is none. A missing file is the ordinary
+# state (nobody has ignored anything), not an error.
+read_ignore() {
+  cat "$ignore_file" 2>/dev/null
+  return 0
+}
+
+# Drop every row of snapshot $1 whose number is in the space-separated set $2.
+# `snapshot()` emits `number updatedAt labels`, so the number is the first
+# field and awk's default splitting finds it with no new dependency.
+ignore_filter() {
+  [ -n "$2" ] || {
+    printf '%s' "$1"
+    return 0
+  }
+  printf '%s\n' "$1" | awk -v ign="$2" '
+    BEGIN { n = split(ign, a, /[ \t\n]+/); for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1 }
+    !($1 in drop)'
+}
 
 # The repo goes into an ERE below, so escape its regex metacharacters first.
 # A repo name may legally contain `.`, and an unescaped `.` is "any character":
@@ -111,6 +175,9 @@ repo_re="$(printf '%s' "$repo" | sed 's/[]\.[*^$+?(){}|]/\\&/g')"
 #   - "A mode word added later needs no second fix here" holds only for a
 #     VALUELESS long flag. `--interval 60`, `--delay=5` and every short flag
 #     fail to match, and would each need this pattern widened again.
+#     `--ignore <numbers>` is exactly such a flag and is deliberately NOT
+#     matched: an --ignore run writes the set and exits without ever taking
+#     the pidfile, so no pid this function is ever asked about can be one.
 #
 # `-ww` is required — BSD `ps` truncates the command column to terminal width.
 live_watcher() {
@@ -123,11 +190,56 @@ live_watcher() {
 
 if [ "$mode" = status ]; then
   incumbent="$(cat "$pidfile" 2>/dev/null)"
+  # Reported on the line after the watcher's, and only when there is a set:
+  # --status runs once per orchestrator cycle, and a line that says nothing is
+  # noise in the output the caller actually reads.
+  ignoring="$(read_ignore)"
   if live_watcher "$incumbent"; then
     echo "watcher running for $repo (pid $incumbent)"
+    [ -n "$ignoring" ] && echo "ignoring: $ignoring"
     exit 3
   fi
   echo "no watcher running for $repo"
+  [ -n "$ignoring" ] && echo "ignoring: $ignoring"
+  exit 0
+fi
+
+if [ "$mode" = ignore ]; then
+  # VALIDATE THE WHOLE LIST BEFORE WRITING ANY OF IT. A partial write followed
+  # by a failure would un-ignore the numbers the caller still owns, and it
+  # would do it at the worst moment: the caller learns of the error, fixes the
+  # command, and in between its own workers wake it.
+  ignore_set=""
+  # Word splitting is the point here: the value is a list of numbers in one
+  # argument, spelled the way a caller would say it.
+  # shellcheck disable=SC2086
+  for token in $ignore_arg; do
+    case "$token" in
+      *[!0-9]*)
+        echo "gh-watch.sh --ignore expects issue/PR numbers, got '$token'"
+        exit 1
+        ;;
+    esac
+    ignore_set="${ignore_set:+$ignore_set }$token"
+  done
+  # Atomic: a watcher polls this file every 30s, and a truncated read is a set
+  # that is briefly missing numbers the caller owns — which fires. Writing a
+  # temp file in the same directory and renaming it means every read sees
+  # either the old set or the new one.
+  ignore_tmp="$ignore_file.$$.tmp"
+  {
+    (printf '%s\n' "$ignore_set" >"$ignore_tmp") 2>/dev/null &&
+      mv -f "$ignore_tmp" "$ignore_file" 2>/dev/null
+  } || {
+    rm -f "$ignore_tmp" 2>/dev/null
+    echo "could not write the ignore set $ignore_file for $repo"
+    exit 1
+  }
+  if [ -n "$ignore_set" ]; then
+    echo "ignoring $ignore_set for $repo"
+  else
+    echo "ignore set cleared for $repo"
+  fi
   exit 0
 fi
 
@@ -310,6 +422,10 @@ base=$(snapshot) || {
   echo "baseline fetch failed for $repo"
   exit 1
 }
+# The set in force when the baseline was taken. It is half of the union below,
+# so it is read here rather than defaulted to empty: a watcher started while
+# numbers are already ignored must not treat its first poll as a release.
+ignore_prev="$(read_ignore)"
 echo "watching $repo (baseline captured $(date +%H:%M:%S))"
 for _ in $(seq 1 110); do
   sleep 30 &
@@ -319,7 +435,20 @@ for _ in $(seq 1 110); do
   # Only a failed fetch is skipped. An empty answer is a real snapshot: it says
   # the repo has nothing open, which differs from a baseline that had something.
   cur=$(snapshot) || continue
-  if [ "$cur" != "$base" ]; then
+  # RE-READ THE SET EVERY POLL. Taking it once at startup would mean a restart
+  # per change of ownership, and a restart is a re-invocation of the caller —
+  # the very thing being removed.
+  ignore_now="$(read_ignore)"
+  # THE UNION of the set in force at the baseline and the set in force now.
+  # A number can be released in the same gap in which it changed ("merge, then
+  # release"): filtered with the current set alone, that poll reports the
+  # caller's own merge as news. The union covers the release poll, and the raw
+  # snapshot below becomes the next baseline, so from the next poll on the
+  # number is compared like any other.
+  ignore_union="$ignore_prev $ignore_now"
+  ignore_prev="$ignore_now"
+  base_seen="$(ignore_filter "$base" "$ignore_union")"
+  if [ "$(ignore_filter "$cur" "$ignore_union")" != "$base_seen" ]; then
     # CONFIRM. Defence in depth against any transient the listings can still
     # produce: take a second snapshot and exit only if it ALSO differs from the
     # baseline. Against the BASELINE, not against $cur: activity that keeps
@@ -333,11 +462,24 @@ for _ in $(seq 1 110); do
     # and poll on: the next poll sees the same difference and confirms it then,
     # one poll late instead of wrong.
     confirm=$(snapshot) || continue
-    [ "$confirm" = "$base" ] && continue
+    # FILTERED TOO, with the SAME set the poll used. This is the easiest place
+    # to leave the ignore set out, and the most expensive: the confirm is taken
+    # seconds after a differing poll, which is exactly when the caller's own
+    # worker is pushing, so an unfiltered confirm hands back most of the wake-ups
+    # the filter just removed. The same set, not a re-read one, because these
+    # two fetches are one decision about one baseline.
+    [ "$(ignore_filter "$confirm" "$ignore_union")" = "$base_seen" ] && continue
     echo "CHANGE DETECTED at $(date +%H:%M:%S)"
+    # The RAW snapshot, ignored rows included: the caller is being woken and
+    # wants the whole state of the repo, not the part it does not own.
     echo "$confirm"
     exit 0
   fi
+  # The raw snapshot becomes the next baseline. With no ignore set this changes
+  # nothing (the two are equal here by definition). With one, it is what stops a
+  # change made while a number was ignored from firing the moment it is
+  # released: that change is already in the baseline it is compared against.
+  base="$cur"
 done
 echo "no change in ~55min; restart me"
 exit 0
