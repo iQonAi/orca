@@ -52,6 +52,9 @@ to subagent workers.
 - Any **@bot-handle mention** in an issue/PR comment = a message TO this
   orchestrator session; read it and dispatch/act accordingly. Each poll:
   check open-issue assignees AND recent comments for bot-handle mentions.
+  A mention on a number in the watcher's ignore set does NOT wake you — see
+  OWNED SET below; that is why the check is per poll and not left to the
+  watcher.
 - **Never from orca itself:** a mention or assignment is a signal only when
   its author is not orca's own login. Orca's own comments (plans, digests,
   replies) never re-trigger it.
@@ -93,11 +96,37 @@ to subagent workers.
     did nothing, so relaunching it identically just returns 3 again; 1 = it
     could not start (no repo / unusable state dir / baseline fetch failed),
     fix the cause rather than spinning. There are no other exit codes.
+  - OWNED SET — left alone, the watcher wakes you for YOUR OWN work: through a
+    dispatch cycle your workers push commits, open PRs and post review
+    comments, and each of those exits the watcher and re-invokes you to report
+    what you just did. So tell it which numbers you own:
+    `~/.claude/scripts/gh-watch.sh --ignore "<numbers>" <owner/repo>`, run in
+    the FOREGROUND — it writes the set and exits 0 without launching anything.
+    A change confined to those numbers is no longer a wake-up. Issue and PR
+    numbers share one set. Write the FULL set every time: it REPLACES the
+    previous one, and `--ignore ""` clears it. Update it when a worker's PR
+    opens (add the PR number beside its issue) and at teardown after the merge.
+    Never restart the watcher to change the set — it re-reads the set on every
+    poll, and the restart would itself be the re-invocation this exists to
+    remove.
+    AT SESSION START, WRITE THE SET UNCONDITIONALLY — `--ignore ""` when you
+    own nothing yet. The file outlives the session that wrote it and nothing
+    removes it: a session that dies between claiming #20 and its teardown
+    leaves `{20}` on disk, and the next session's watcher is deaf on #20 until
+    someone writes the set again. Your first write is what clears a dead
+    session's leftovers, so it cannot be conditional on your having work.
+    BLIND SPOT: an external comment, an @bot-handle mention or an `on-hold`
+    label on an ignored number does not wake you either. Nothing can tell those
+    from your own workers, because both act as your login. Compensate with the
+    poll cadence you already have: 60s while comments flow, and re-read your
+    own PRs before you merge them.
   - LIVENESS CHECK — the one probe you may use is the script's own:
     `~/.claude/scripts/gh-watch.sh --status <owner/repo>`, run in the
     FOREGROUND (it never launches anything, never spins, and returns at once).
     0 = nobody is watching this repo; 3 = a live watcher holds it, and its pid
-    is printed; 1 = the state dir is unusable.
+    is printed; 1 = the state dir is unusable. It also prints `ignoring: <set>`
+    when the repo has one, which is how you check what you are currently deaf
+    to.
   - A watcher you did not launch: a `--status` 3 (or a launch that exits 3)
     when you have no live watcher background job of your own means the
     incumbent belongs to another/previous session. Its exit notifies THEM, not
@@ -123,13 +152,17 @@ to subagent workers.
    `needs-info` = wait).
 2. `git worktree add .claude/worktrees/<slug> -b feat/<slug>` at primary
    root.
-3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`.
+3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`. Add
+   the issue number to the watcher's ignore set (`--ignore`, full set) before
+   the worker starts pushing.
 4. House rules: workers follow the project's own contribution rules
    (CLAUDE.md / CONTRIBUTING) where they exist; orca adds no formatting or
    code style rules of its own.
 5. Verify development by running the project's
    `build | lint | typecheck | test` commands if available.
-6. Push branch → PR `Closes #N`. Never commit/merge local main.
+6. Push branch → PR `Closes #N`. Never commit/merge local main. Add the PR
+   number to the ignore set beside its issue: the review cycle below is a
+   stream of your own comments and pushes.
 7. Review cycle: after PR creation, request the project's configured
    external reviewer, if the project CLAUDE.md names one (e.g. Copilot:
    `gh api -X POST repos/<owner>/<repo>/pulls/<n>/requested_reviewers -f 'reviewers[]=copilot-pull-request-reviewer[bot]'`),
@@ -146,7 +179,8 @@ to subagent workers.
    label, DO NOT merge/dispatch — wait for label removal or an explicit
    bot-handle sign-off comment.
 9. Teardown: EXIT worktree before `git worktree remove`; delete branch local
-   - origin; release claims; board row → done.
+   - origin; release claims; board row → done; rewrite the ignore set without
+   the merged issue and PR, so anything that happens on them wakes you again.
 
 ## Language Guidelines
 
