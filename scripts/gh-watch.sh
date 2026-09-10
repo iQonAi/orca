@@ -423,10 +423,12 @@ fi
 # the sleep and `wait`ing on it makes the trap run at once; release kills the
 # sleep so it is not left behind.
 sleep_pid=""
-# SC2317: this body is unreachable only to a static reader - it is invoked
-# indirectly by the EXIT/INT/TERM/HUP traps installed immediately below, which
-# ShellCheck does not trace back to the function.
-# shellcheck disable=SC2317
+# SC2317 and SC2329: this body looks unreachable, and the function looks
+# uncalled, only to a static reader - the EXIT/INT/TERM/HUP traps installed
+# immediately below invoke it, which ShellCheck does not trace back to the
+# function. SC2329 is new in 0.11; 0.10 ignores a rule name it does not know,
+# so one directive covers both.
+# shellcheck disable=SC2317,SC2329
 release() {
   [ -n "$sleep_pid" ] && kill "$sleep_pid" 2>/dev/null
   [ "$(cat "$pidfile" 2>/dev/null)" = "$$" ] && rm -f "$pidfile"
