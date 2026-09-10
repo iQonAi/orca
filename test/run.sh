@@ -650,18 +650,27 @@ wassert 'gh-watch: the quiet repo watcher took a pidfile and released it on firi
 # nothing — degrading silently, and in the one direction that matters.
 BADDELAY_OUT="$GH_TMP/baddelay.out"
 BADDELAY_ERR="$GH_TMP/baddelay.err"
-PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' GH_WATCH_CONFIRM_DELAY='oops' \
-  "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-baddelay' >"$BADDELAY_OUT" 2>"$BADDELAY_ERR"
-wassert 'gh-watch: a non-numeric GH_WATCH_CONFIRM_DELAY is rejected with a message on stderr' \
-  grep -q 'GH_WATCH_CONFIRM_DELAY' "$BADDELAY_ERR"
+# The check is on the VALUE, not on the spelling. `0`, `00` and `000` are all
+# digits, so a digits-only test passes them straight through to `sleep`, which
+# then sleeps for no time at all — the same silent collapse of the confirm gap
+# that a non-numeric value causes, reached by a value that looks well formed.
+for BADDELAY in 'oops' '5s' '0' '00' '000'; do
+  PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' GH_WATCH_CONFIRM_DELAY="$BADDELAY" \
+    "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-baddelay' >"$BADDELAY_OUT" 2>"$BADDELAY_ERR"
+  wassert "gh-watch: GH_WATCH_CONFIRM_DELAY '$BADDELAY' is rejected with a message on stderr" \
+    grep -q 'GH_WATCH_CONFIRM_DELAY' "$BADDELAY_ERR"
+done
 wassert 'gh-watch: rejecting the confirm delay leaves stdout to the script itself' \
   test "$(cat "$BADDELAY_OUT")" = 'baseline fetch failed for octocat/watch-baddelay'
 
 OKDELAY_ERR="$GH_TMP/okdelay.err"
-PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' GH_WATCH_CONFIRM_DELAY='7' \
-  "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-okdelay' >/dev/null 2>"$OKDELAY_ERR"
-wassert 'gh-watch: a valid GH_WATCH_CONFIRM_DELAY is accepted without a message' \
-  test ! -s "$OKDELAY_ERR"
+# 10 is the value a careless "reject anything holding a zero" would also refuse.
+for OKDELAY in '1' '7' '10'; do
+  PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' GH_WATCH_CONFIRM_DELAY="$OKDELAY" \
+    "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-okdelay' >/dev/null 2>"$OKDELAY_ERR"
+  wassert "gh-watch: GH_WATCH_CONFIRM_DELAY '$OKDELAY' is accepted without a message" \
+    test ! -s "$OKDELAY_ERR"
+done
 
 reap_live_watchers
 unset GH_WATCH_STATE_DIR

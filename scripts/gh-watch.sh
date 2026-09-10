@@ -287,13 +287,22 @@ snapshot() {
 # `sleep`, which fails, prints its usage into the output the orchestrator reads,
 # and leaves no gap between the two fetches at all — the confirm degrades to
 # nothing, silently, in the one direction that matters.
+# Two conditions, because the shape alone is not the value: it must be all
+# digits, AND at least one of them must be non-zero. `00` and `000` are as
+# digits-only as `30` is, and each one sleeps for exactly no time — the same
+# collapse a non-numeric value causes, reached by a value that looks well
+# formed. Asking for a non-zero digit rejects every spelling of zero at once,
+# and still accepts `10`, which "holds no zero" would refuse.
 confirm_delay="${GH_WATCH_CONFIRM_DELAY:-5}"
+confirm_delay_ok=0
 case "$confirm_delay" in
-  '' | 0 | *[!0-9]*)
-    echo "GH_WATCH_CONFIRM_DELAY '$confirm_delay' is not a positive integer; using 5" >&2
-    confirm_delay=5
-    ;;
+  *[!0-9]*) ;;
+  *[1-9]*) confirm_delay_ok=1 ;;
 esac
+if [ "$confirm_delay_ok" != 1 ]; then
+  echo "GH_WATCH_CONFIRM_DELAY '$confirm_delay' is not a positive integer; using 5" >&2
+  confirm_delay=5
+fi
 # A FAILED baseline is fatal; an EMPTY one is not. The watcher has nothing to
 # compare against if it never got an answer, but "" is a perfectly good baseline
 # for a repo with nothing open yet.
