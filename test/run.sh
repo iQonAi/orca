@@ -135,10 +135,10 @@ run_watcher 0 'octocat/hello-world' \
 # GH_WATCH_STATE_DIR redirects the pidfiles into a temp dir so a real watcher
 # on this machine is neither seen nor disturbed.
 #
-# Trick used throughout: with the stub returning EMPTY output the baseline
-# fetch fails, so a run that GETS PAST the guard exits 1 ("baseline fetch
-# failed") within milliseconds, while a run REFUSED by the guard exits 3. That
-# makes "did it acquire?" a fast, deterministic assertion.
+# Trick used throughout: with the stub FAILING (an empty GH_STUB_OUT) the
+# baseline fetch fails, so a run that GETS PAST the guard exits 1 ("baseline
+# fetch failed") within milliseconds, while a run REFUSED by the guard exits 3.
+# That makes "did it acquire?" a fast, deterministic assertion.
 
 WATCH_SCRIPT="$REPO_ROOT/scripts/gh-watch.sh"
 GH_TMP="$(mktemp -d)"
@@ -170,9 +170,27 @@ mkdir -p "$STUB_BIN"
 # exhausted (only the line it reads is clamped to the last line), so
 # `await_calls` can wait for a call past the scripted ones, and a case can tell
 # "fired on the first differing poll" from "fired a poll later" by the count.
+#
+# A snapshot takes TWO calls, so each has its own sequence: GH_STUB_SEQ answers
+# `gh issue list` and GH_STUB_SEQ_PR answers `gh pr list`. That keeps one line
+# consumed per snapshot per command, so a sequence still reads as "the answers
+# this repo's issues give, poll by poll". GH_STUB_SEQ_PR unset means the PR
+# listing succeeds with no items.
+#
+# SUCCESS AND FAILURE ARE DISTINCT, because the script now distinguishes them.
+# `FAIL` is the only sentinel: the command exits non-zero and answers nothing.
+# Every other line, an empty one included, is a SUCCESSFUL answer, and an empty
+# successful answer is a listing that truthfully holds no items.
 cat >"$STUB_BIN/gh" <<'STUB'
 #!/usr/bin/env bash
 seq_file="${GH_STUB_SEQ-}"
+case "${1-} ${2-}" in
+  'pr list')
+    seq_file="${GH_STUB_SEQ_PR-}"
+    # No PR sequence: the listing succeeds and holds no items.
+    [ -n "$seq_file" ] || exit 0
+    ;;
+esac
 if [ -n "$seq_file" ] && [ -f "$seq_file" ]; then
   n="$(cat "$seq_file.n" 2>/dev/null)"
   case "$n" in '' | *[!0-9]*) n=1 ;; esac
@@ -180,10 +198,17 @@ if [ -n "$seq_file" ] && [ -f "$seq_file" ]; then
   last="$(grep -c '' "$seq_file")"
   line_no="$n"
   [ "$line_no" -gt "$last" ] && line_no="$last"
-  printf '%s' "$(sed -n "${line_no}p" "$seq_file")"
+  answer="$(sed -n "${line_no}p" "$seq_file")"
+  [ "$answer" = FAIL ] && exit 1
+  printf '%s' "$answer"
   exit 0
 fi
-printf '%s' "${GH_STUB_OUT-[]}"
+out="${GH_STUB_OUT-[]}"
+# An EMPTY GH_STUB_OUT is a FAILING command. That is what makes the baseline
+# fetch fail within milliseconds for the cases that only care about the acquire
+# path — an empty answer no longer stops the watcher, a missing one does.
+[ -n "$out" ] || exit 1
+printf '%s' "$out"
 STUB
 chmod +x "$STUB_BIN/gh"
 
@@ -231,14 +256,16 @@ run_watch_in() {
 run_watch() { run_watch_in "$GH_WATCH_STATE_DIR" "$1" "$2" "$3" "$5" "$4"; }
 
 # run_watch_seq <expected_exit> <stdout_substr|EMPTY> <desc> <repo> <seq_file>
+#               [pr_seq_file]
 #   A watcher driven through a scripted sequence of `gh` answers, in the
 #   foreground: the compressed poll interval makes several polls take about a
 #   second, so the run ends on its own and the case reads its exit code.
+#   Omitting <pr_seq_file> leaves the PR listing empty and successful.
 run_watch_seq() {
-  local expected_exit="$1" substr="$2" desc="$3" repo="$4" seq_file="$5"
+  local expected_exit="$1" substr="$2" desc="$3" repo="$4" seq_file="$5" pr_seq="${6-}"
   local out actual
-  out="$(PATH="$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="$seq_file" GH_WATCH_CONFIRM_DELAY=1 \
-    "$BASH_BIN" "$WATCH_SCRIPT" "$repo" 2>&1)"
+  out="$(PATH="$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="$seq_file" GH_STUB_SEQ_PR="$pr_seq" \
+    GH_WATCH_CONFIRM_DELAY=1 "$BASH_BIN" "$WATCH_SCRIPT" "$repo" 2>&1)"
   actual=$?
   if [[ "$actual" != "$expected_exit" ]]; then
     printf 'FAIL: %s\n      expected exit %s, got %s (output: %s)\n' \
@@ -295,18 +322,24 @@ start_live() {
   track_live "$!" "$repo"
 }
 
-# start_live_seq <repo> <seq_file> — a live watcher whose polls are answered
-# from <seq_file>, with the poll interval compressed. For the cases that must
-# observe a watcher that does NOT exit; the ones that exit run in the
+# start_live_seq <repo> <seq_file> [pr_seq_file] — a live watcher whose polls
+# are answered from <seq_file>, with the poll interval compressed. For the cases
+# that must observe a watcher that does NOT exit; the ones that exit run in the
 # foreground under run_watch_seq.
 start_live_seq() {
-  PATH="$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="$2" GH_WATCH_CONFIRM_DELAY=1 \
-    "$BASH_BIN" "$WATCH_SCRIPT" "$1" >/dev/null 2>&1 &
+  PATH="$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="$2" GH_STUB_SEQ_PR="${3-}" \
+    GH_WATCH_CONFIRM_DELAY=1 "$BASH_BIN" "$WATCH_SCRIPT" "$1" >/dev/null 2>&1 &
   track_live "$!" "$1"
 }
 
 # await_calls <seq_file> <n> — wait until the stub has answered n calls from
 # this sequence, so a case asserts on the poll it means, not on elapsed time.
+#
+# This is also how a case proves a watcher is STILL POLLING. `kill -0` cannot:
+# an exited watcher is a child of this shell, so it lingers as a zombie whose
+# pid `kill -0` still finds, and the assertion passes for a watcher that fired
+# and stopped. A call count that keeps rising is the property actually wanted,
+# and it stops rising the moment the watcher exits.
 await_calls() {
   local i cur
   for i in $(seq 1 40); do
@@ -494,25 +527,31 @@ wassert 'gh-watch: the surviving racer is the pid recorded in the pidfile' \
 wassert 'gh-watch: the race left no lock directory behind' \
   test ! -e "$(watch_pidfile "$RACE_REPO").lock"
 
-# CONFIRM BEFORE FIRING. The listing occasionally answers `[]` for a repo whose
-# issues are all still open; a watcher that exits on the first differing poll
-# reports that flake as a change and wakes the orchestrator for nothing (#32).
-# A second fetch has to disagree with the BASELINE too before the watcher
-# exits. These cases script the answers with GH_STUB_SEQ and compress the poll
-# interval, so each drives several polls in about a second.
+# THE SNAPSHOT, AND THE CONFIRM ON TOP OF IT. `snapshot()` reads `gh issue list`
+# plus `gh pr list` — the REST listing it replaced served empty answers for
+# minutes at a time and the watcher reported them as "everything closed" (#32).
+# A poll that differs from the baseline is re-fetched, and the watcher exits
+# only if that answer disagrees with the BASELINE too.
+#
+# These cases script the issue answers with GH_STUB_SEQ, the PR answers with
+# GH_STUB_SEQ_PR, and compress the poll interval, so each drives several polls
+# in about a second. `FAIL` scripts a command that FAILS; an empty line scripts
+# one that SUCCEEDS holding no items. The script has to tell those apart, so the
+# stub does too.
 
-# baseline, a flake, the baseline again: the flake is not a change.
+# A poll that differs and then agrees with the baseline again is not a change.
 SEQ_FLAKE="$GH_TMP/seq-flake"
-printf '%s\n' '[{"n":1}]' '[]' '[{"n":1}]' >"$SEQ_FLAKE"
+printf '%s\n' '1 2026-09-09T10:00:00Z bug' '2 2026-09-09T10:01:00Z' \
+  '1 2026-09-09T10:00:00Z bug' >"$SEQ_FLAKE"
 start_live_seq 'octocat/watch-flake' "$SEQ_FLAKE"
 LIVE_FLAKE="$REPLY"
 wassert 'gh-watch: a differing poll takes a confirming fetch (the flake case reached it)' \
   await_calls "$SEQ_FLAKE" 3
 wassert 'gh-watch: the stub cursor keeps counting past the scripted lines' \
   await_calls "$SEQ_FLAKE" 5
-wassert 'gh-watch: a transient [] between two baselines does not stop the watcher' \
+wassert 'gh-watch: a transient difference between two baselines does not stop the watcher' \
   kill -0 "$LIVE_FLAKE"
-wassert 'gh-watch: the watcher that saw the transient [] still holds its pidfile' \
+wassert 'gh-watch: the watcher that saw the transient difference still holds its pidfile' \
   test "$(cat "$(watch_pidfile 'octocat/watch-flake')" 2>/dev/null)" = "$LIVE_FLAKE"
 
 # A real change is still there on the confirming fetch, so it fires. The
@@ -520,22 +559,25 @@ wassert 'gh-watch: the watcher that saw the transient [] still holds its pidfile
 # differed, or activity that keeps moving between the two fetches would be
 # swallowed as "the same difference twice".
 SEQ_REAL="$GH_TMP/seq-real"
-printf '%s\n' '[{"n":1}]' '[{"n":1},{"n":2}]' '[{"n":1},{"n":2},{"n":3}]' >"$SEQ_REAL"
+printf '%s\n' '1 2026-09-09T10:00:00Z' '1 2026-09-09T10:02:00Z' \
+  '1 2026-09-09T10:03:00Z' >"$SEQ_REAL"
 run_watch_seq 0 'CHANGE DETECTED' \
   'gh-watch: a change confirmed against the baseline fires (exit 0)' \
   'octocat/watch-real' "$SEQ_REAL"
 wassert 'gh-watch: firing on a confirmed change released the pidfile' \
   test ! -e "$(watch_pidfile 'octocat/watch-real')"
 
-# A confirming fetch that comes back EMPTY is a failed fetch, not a
-# confirmation: inconclusive, so the baseline stands and the watcher polls on.
+# A confirming fetch that FAILS is not a confirmation: inconclusive, so the
+# baseline stands and the watcher polls on.
 SEQ_INCONCLUSIVE="$GH_TMP/seq-inconclusive"
-printf '%s\n' '[{"n":1}]' '[{"n":1},{"n":2}]' '' >"$SEQ_INCONCLUSIVE"
+printf '%s\n' '1 2026-09-09T10:00:00Z' '1 2026-09-09T10:02:00Z' 'FAIL' >"$SEQ_INCONCLUSIVE"
 start_live_seq 'octocat/watch-inconclusive' "$SEQ_INCONCLUSIVE"
 LIVE_INCONCLUSIVE="$REPLY"
 wassert 'gh-watch: a differing poll takes a confirming fetch (the failing-fetch case reached it)' \
   await_calls "$SEQ_INCONCLUSIVE" 3
-wassert 'gh-watch: an empty confirming fetch does not stop the watcher' \
+wassert 'gh-watch: a failed confirming fetch does not stop the watcher (still polling)' \
+  await_calls "$SEQ_INCONCLUSIVE" 6
+wassert 'gh-watch: the watcher whose confirming fetch failed is still alive' \
   kill -0 "$LIVE_INCONCLUSIVE"
 wassert 'gh-watch: the watcher whose confirming fetch failed still holds its pidfile' \
   test "$(cat "$(watch_pidfile 'octocat/watch-inconclusive')" 2>/dev/null)" = "$LIVE_INCONCLUSIVE"
@@ -543,8 +585,8 @@ wassert 'gh-watch: the watcher whose confirming fetch failed still holds its pid
 # ...and the difference is not lost with it: the next poll sees the same
 # difference and confirms it, so the change is reported one poll late.
 SEQ_RETRY="$GH_TMP/seq-retry"
-printf '%s\n' '[{"n":1}]' '[{"n":1},{"n":2}]' '' '[{"n":1},{"n":2}]' '[{"n":1},{"n":2}]' \
-  >"$SEQ_RETRY"
+printf '%s\n' '1 2026-09-09T10:00:00Z' '1 2026-09-09T10:02:00Z' 'FAIL' \
+  '1 2026-09-09T10:02:00Z' '1 2026-09-09T10:02:00Z' >"$SEQ_RETRY"
 run_watch_seq 0 'CHANGE DETECTED' \
   'gh-watch: a difference whose confirming fetch failed fires on the next poll' \
   'octocat/watch-retry' "$SEQ_RETRY"
@@ -552,6 +594,47 @@ wassert 'gh-watch: it fired on the SECOND poll, having consumed all five answers
   test "$(cat "$SEQ_RETRY.n" 2>/dev/null)" = 6
 wassert 'gh-watch: firing after a failed confirming fetch released the pidfile' \
   test ! -e "$(watch_pidfile 'octocat/watch-retry')"
+
+# A repo can hold no open issues and an open PR. The two listings are separate
+# calls, so an empty issue list must not hide PR activity — and must not be read
+# as a failure either.
+SEQ_PRONLY_I="$GH_TMP/seq-pronly-issues"
+printf '%s\n' '' >"$SEQ_PRONLY_I"
+SEQ_PRONLY_P="$GH_TMP/seq-pronly-prs"
+printf '%s\n' '7 2026-09-09T10:00:00Z' '7 2026-09-09T10:04:00Z review' \
+  '7 2026-09-09T10:04:00Z review' >"$SEQ_PRONLY_P"
+run_watch_seq 0 '7 2026-09-09T10:04:00Z review' \
+  'gh-watch: with no open issues at all, a PR-only change is still seen and fires' \
+  'octocat/watch-pronly' "$SEQ_PRONLY_I" "$SEQ_PRONLY_P"
+wassert 'gh-watch: the PR-only fire released the pidfile' \
+  test ! -e "$(watch_pidfile 'octocat/watch-pronly')"
+
+# One listing failing while the other answers makes the whole snapshot
+# inconclusive. Reading "the issues answered, the PRs did not" as "every PR just
+# closed" is the same mistake as reading a flaky empty as a change.
+SEQ_HALF_I="$GH_TMP/seq-half-issues"
+printf '%s\n' '1 2026-09-09T10:00:00Z' >"$SEQ_HALF_I"
+SEQ_HALF_P="$GH_TMP/seq-half-prs"
+printf '%s\n' '9 2026-09-09T10:00:00Z' 'FAIL' >"$SEQ_HALF_P"
+start_live_seq 'octocat/watch-half' "$SEQ_HALF_I" "$SEQ_HALF_P"
+LIVE_HALF="$REPLY"
+wassert 'gh-watch: one listing failing is not the other listing emptying (still polling)' \
+  await_calls "$SEQ_HALF_I" 6
+wassert 'gh-watch: the watcher whose PR listing failed is still alive' \
+  kill -0 "$LIVE_HALF"
+wassert 'gh-watch: the watcher whose PR listing failed still holds its pidfile' \
+  test "$(cat "$(watch_pidfile 'octocat/watch-half')" 2>/dev/null)" = "$LIVE_HALF"
+
+# A quiet repo answers both listings with no items, truthfully. Treated as a
+# failed fetch that would refuse the launch outright, and the watcher would be
+# deaf on exactly the repo where a first issue arriving is worth waking for.
+SEQ_QUIET="$GH_TMP/seq-quiet"
+printf '%s\n' '' '' '4 2026-09-09T10:07:00Z' '4 2026-09-09T10:07:00Z' >"$SEQ_QUIET"
+run_watch_seq 0 '4 2026-09-09T10:07:00Z' \
+  'gh-watch: an empty baseline is truthful, and a first item on a quiet repo fires' \
+  'octocat/watch-quiet' "$SEQ_QUIET"
+wassert 'gh-watch: the quiet repo watcher took a pidfile and released it on firing' \
+  test ! -e "$(watch_pidfile 'octocat/watch-quiet')"
 
 # The confirm delay is validated before the loop. Unvalidated, a non-numeric
 # value reaches `sleep`, which fails, prints its usage into the watcher's output

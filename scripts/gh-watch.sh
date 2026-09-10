@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Polls a GitHub repo's open issues/PRs every 30s; exits as soon as
-# issue/comment/label state changes. Exiting re-invokes the orchestrator
-# (harness task-notification), giving ~30s change detection under the
-# harness's 60s wakeup floor — ~35s on the poll that sees a difference, which
-# is re-fetched $GH_WATCH_CONFIRM_DELAY seconds later (default 5) and must
-# still differ from the baseline before the watcher exits.
+# Polls a GitHub repo's open issues and PRs every 30s (`gh issue list` plus
+# `gh pr list`); exits as soon as issue/comment/label state changes. Exiting
+# re-invokes the orchestrator (harness task-notification), giving ~30s change
+# detection under the harness's 60s wakeup floor — ~35s on the poll that sees a
+# difference, which is re-fetched $GH_WATCH_CONFIRM_DELAY seconds later
+# (default 5) and must still differ from the baseline before the watcher exits.
 #
 # Usage: gh-watch.sh [--status|--takeover] [owner/repo]
 #   No repo argument: repo auto-detected from cwd via `gh repo view`.
@@ -235,9 +235,33 @@ trap 'release' EXIT
 # Signals exit 0, not 130/143: the exit-code contract is {0,1,3}, and a watcher
 # stopped by a signal is one the caller should restart — which is what 0 means.
 trap 'release; exit 0' INT TERM HUP
+# Built from the GraphQL-backed CLI listings, NOT from `repos/<repo>/issues`.
+# That REST listing served inconsistent EMPTY responses for minutes at a time
+# from a bad replica — it answered `[]` while `gh pr list` returned the PR that
+# was open — and a watcher reading one of those as "everything just closed"
+# reports a change that never happened (#32). `gh issue list` and `gh pr list`
+# stayed consistent through every observed flake window. They take two calls
+# because `gh issue list` excludes pull requests, where the REST listing
+# included them; the concatenation is sorted so listing order alone can never
+# look like a change.
+#
+# EMPTY IS NOT FAILURE. A listing that succeeds with no items is the truth about
+# a quiet repo — zero open issues alongside one open PR is an ordinary state.
+# Only a non-zero exit means "no answer", and only that returns non-zero here.
+# Conflating the two would leave the watcher deaf on exactly the repos where a
+# first issue arriving is the thing worth waking up for.
 snapshot() {
-  gh api "repos/$repo/issues?state=open&per_page=50" \
-    --jq '[.[] | {n: .number, u: .updated_at, l: [.labels[].name]}]' 2>/dev/null
+  local issues prs
+  issues=$(gh issue list --repo "$repo" --state open --limit 50 \
+    --json number,updatedAt,labels \
+    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"') || return 1
+  prs=$(gh pr list --repo "$repo" --state open --limit 50 \
+    --json number,updatedAt,labels \
+    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"') || return 1
+  {
+    [ -n "$issues" ] && printf '%s\n' "$issues"
+    [ -n "$prs" ] && printf '%s\n' "$prs"
+  } | sort
 }
 # Seconds between a poll that differs from the baseline and the fetch that has
 # to differ from it too before the watcher exits. It is the whole cost of the
@@ -253,8 +277,10 @@ case "$confirm_delay" in
     confirm_delay=5
     ;;
 esac
-base=$(snapshot) || base=""
-[ -z "$base" ] && {
+# A FAILED baseline is fatal; an EMPTY one is not. The watcher has nothing to
+# compare against if it never got an answer, but "" is a perfectly good baseline
+# for a repo with nothing open yet.
+base=$(snapshot) || {
   echo "baseline fetch failed for $repo"
   exit 1
 }
@@ -264,26 +290,23 @@ for _ in $(seq 1 110); do
   sleep_pid=$!
   wait "$sleep_pid" 2>/dev/null
   sleep_pid=""
+  # Only a failed fetch is skipped. An empty answer is a real snapshot: it says
+  # the repo has nothing open, which differs from a baseline that had something.
   cur=$(snapshot) || continue
-  [ -z "$cur" ] && continue
   if [ "$cur" != "$base" ]; then
-    # CONFIRM. The listing sometimes answers `[]` for a repo whose issues are
-    # all still open, and exiting on that wakes the orchestrator for nothing.
-    # So take a second snapshot and exit only if it ALSO differs from the
+    # CONFIRM. Defence in depth against any transient the listings can still
+    # produce: take a second snapshot and exit only if it ALSO differs from the
     # baseline. Against the BASELINE, not against $cur: activity that keeps
     # moving between the two fetches is a real change, and comparing the two
-    # snapshots with each other would swallow exactly that case. `[]` gets no
-    # special case — a repo whose last open issue just closed answers it
-    # honestly, and the second fetch tells the two apart.
+    # snapshots with each other would swallow exactly that case.
     sleep "$confirm_delay" &
     sleep_pid=$!
     wait "$sleep_pid" 2>/dev/null
     sleep_pid=""
-    confirm=$(snapshot) || confirm=""
-    # An empty confirming fetch failed; it did not confirm anything. Leave the
-    # baseline standing and poll on: the next poll sees the same difference and
-    # confirms it then, one poll late instead of wrong.
-    [ -z "$confirm" ] && continue
+    # A FAILED confirming fetch confirmed nothing. Leave the baseline standing
+    # and poll on: the next poll sees the same difference and confirms it then,
+    # one poll late instead of wrong.
+    confirm=$(snapshot) || continue
     [ "$confirm" = "$base" ] && continue
     echo "CHANGE DETECTED at $(date +%H:%M:%S)"
     echo "$confirm"
