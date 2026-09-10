@@ -119,6 +119,16 @@ if [ "$mode" != status ]; then
   # the watcher, or plant a pidfile and stop it starting. `-m` applies only when
   # mkdir CREATES the directory, so an existing state dir keeps the mode it has
   # — nobody's working setup changes under them.
+  #
+  # SC2174 is right that `-m` with `-p` covers only the DEEPEST directory, and
+  # that is the one being asked for: the leaf is what holds the pidfile, the
+  # lock and the ignore set. Every parent above it already exists on the paths
+  # this script builds — $XDG_RUNTIME_DIR, or $TMPDIR/`/tmp` — so there are no
+  # intermediate directories left to create. A $GH_WATCH_STATE_DIR pointing
+  # somewhere deep and absent is the exception: the levels above the leaf are
+  # then made with the ambient umask, and the operator who chose that path owns
+  # that choice.
+  # shellcheck disable=SC2174
   mkdir -p -m 700 "$state_dir" 2>/dev/null
   { [ -d "$state_dir" ] && [ -w "$state_dir" ] && [ -x "$state_dir" ]; } || {
     echo "watcher state dir $state_dir is not a writable directory"
