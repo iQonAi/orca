@@ -22,9 +22,9 @@
 #
 # Checks, in order (each prints `ok:` or `fail:` with the reason):
 #   1. tools     gh, git, jq and claude on PATH
-#   2. identity  the token file exists, is not empty and is mode 0600 (a file
-#                group or world can read is refused, unread); gh api user
-#                succeeds with it - `running as <login>`
+#   2. identity  the token file exists, is not empty and is mode 0600 or 0400
+#                (a file group or world can read is refused, unread); gh api
+#                user succeeds with it - `running as <login>`
 #   3. repo      owner/repo from the checkout's origin remote (or --repo); the
 #                bot's permission on it is write, maintain or admin
 #   4. install   the playbook, the SessionStart hook and the watcher resolve
@@ -68,7 +68,7 @@ Anything else is passed through to claude.
 
 Files
   $TOKEN_FILE
-      the bot's token, mode 0600 (ORCA_TOKEN_FILE overrides)
+      the bot's token, mode 0600 or 0400 (ORCA_TOKEN_FILE overrides)
   $SESSIONS_DIR/<repo-slug>
       pid of the orca running for that repository
 
@@ -146,12 +146,12 @@ elif [ ! -s "$TOKEN_FILE" ]; then
 else
   mode=$(file_mode "$TOKEN_FILE")
   case "$mode" in
-    600 | 0600)
-      ok "token: $TOKEN_FILE (mode 0600)"
+    600 | 0600 | 400 | 0400)
+      ok "token: $TOKEN_FILE (mode 0${mode#0})"
       token=$(cat "$TOKEN_FILE")
       ;;
     *)
-      fail "token: $TOKEN_FILE is mode ${mode:-unknown}, not 0600 (group or other can read it); run: chmod 600 $TOKEN_FILE"
+      fail "token: $TOKEN_FILE is mode ${mode:-unknown}, not 0600 or 0400 (group or other can read it); run: chmod 600 $TOKEN_FILE"
       ;;
   esac
 fi

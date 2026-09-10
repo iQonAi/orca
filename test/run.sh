@@ -1839,6 +1839,15 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: a 0644 token file gets the chmod hint' "run: chmod 600 $L_TOK644"
   orca_not_said 'launcher: a 0644 token file is not used to reach GitHub' 'running as'
   wassert 'launcher: a 0644 token file is never handed to gh' bash -c "! grep -q 'api user' '$L_CALLS'"
+  # read-only for the owner is as private as 0600
+  L_TOK400="$L_TMP/token-400"
+  printf 'ghp_stubtoken\n' >"$L_TOK400"
+  chmod 400 "$L_TOK400"
+  ORCA_ENV=(ORCA_TOKEN_FILE="$L_TOK400")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a 0400 token file passes --check' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: a 0400 token file is reported with its own mode' "ok: token: $L_TOK400 (mode 0400)"
+  orca_said 'launcher: a 0400 token file is used to reach GitHub' 'ok: running as orca-bot'
   L_TOKEMPTY="$L_TMP/token-empty"
   : >"$L_TOKEMPTY"
   chmod 600 "$L_TOKEMPTY"
