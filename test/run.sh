@@ -393,6 +393,18 @@ run_watch 1 'baseline fetch failed' \
   'octocat/watch-other' ''
 wassert 'gh-watch: the other-repo watcher was left alone' kill -0 "$LIVE_B"
 
+# A repo name may legally contain `.`, which is "any character" in an ERE. With
+# the repo interpolated into the pattern raw, this repo's pidfile would be
+# honoured for a watcher of a DIFFERENT repo whose name differs only there, so
+# the launch would be refused and the repo would go unwatched.
+start_live 'octocat/watchxdot'
+LIVE_DOT="$REPLY"
+printf '%s\n' "$LIVE_DOT" >"$(watch_pidfile 'octocat/watch.dot')"
+run_watch 1 'baseline fetch failed' \
+  'gh-watch: a dot in the repo name is escaped, so a look-alike repo is not matched' \
+  'octocat/watch.dot' ''
+wassert 'gh-watch: the look-alike repo watcher was left alone' kill -0 "$LIVE_DOT"
+
 # An existing but UNWRITABLE state dir: `mkdir -p` returns 0 for it, so the
 # script must check writability itself. Reporting 3 here would tell the caller
 # "one is already running, do not relaunch" when none is.

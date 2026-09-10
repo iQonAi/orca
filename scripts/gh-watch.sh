@@ -80,6 +80,13 @@ if [ "$mode" != status ]; then
 fi
 pidfile="$state_dir/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_').pid"
 
+# The repo goes into an ERE below, so escape its regex metacharacters first.
+# A repo name may legally contain `.`, and an unescaped `.` is "any character":
+# the pattern built for `octocat/watch.dot` would match a watcher for
+# `octocat/watchxdot`, and this repo's pidfile would then be honoured for a
+# watcher of another repo — refusing the launch and leaving this repo unwatched.
+repo_re="$(printf '%s' "$repo" | sed 's/[]\.[*^$+?(){}|]/\\&/g')"
+
 # Is $1 a live watcher FOR THIS REPO? (pid alive is not enough: pids get
 # recycled.) The match is anchored on the script name AND the repo argument,
 # because an unanchored `gh-watch` substring test matches far more than real
@@ -98,7 +105,7 @@ live_watcher() {
   case "$1" in '' | *[!0-9]*) return 1 ;; esac
   kill -0 "$1" 2>/dev/null || return 1
   ps -ww -o args= -p "$1" 2>/dev/null |
-    grep -qE "gh-watch\.sh([[:space:]]+--[A-Za-z-]+)*([[:space:]]+$repo)?[[:space:]]*$"
+    grep -qE "gh-watch\.sh([[:space:]]+--[A-Za-z-]+)*([[:space:]]+$repo_re)?[[:space:]]*$"
 }
 
 if [ "$mode" = status ]; then
