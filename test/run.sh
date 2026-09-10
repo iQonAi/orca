@@ -2036,6 +2036,19 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   run_orca "$REPO_SSH" --check
   wassert 'launcher: a record naming a live pid that is not an orca does not block' test "$ORCA_RC" -eq 0
   kill -9 "$L_IMPOSTOR" 2>/dev/null
+  # a live pid whose argv merely contains the word orca (a recycled pid now
+  # running `less notes/orca`) is not an orca launch either
+  bash -c 'exec -a "less notes/orca" sleep 300' &
+  L_LOOKALIKE=$!
+  disown "$L_LOOKALIKE" 2>/dev/null || true
+  wassert 'launcher: the lookalike process really has orca in its argv' \
+    bash -c "ps -ww -o args= -p $L_LOOKALIKE | grep -qE '(^|[[:space:]/])orca([[:space:]]|$)'"
+  printf '%s\n' "$L_LOOKALIKE" >"$L_RECORD"
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a record naming a live pid with orca in its argv but no claude --agent orca does not block' \
+    test "$ORCA_RC" -eq 0
+  orca_said 'launcher: the lookalike record reports no other instance' 'ok: instance: no other orca running for octocat/hello-world'
+  kill -9 "$L_LOOKALIKE" 2>/dev/null
   printf '%s\n' "$DEAD_PID" >"$L_RECORD"
   run_orca "$REPO_SSH"
   wassert 'launcher: a launch over a stale record proceeds' test "$ORCA_RC" -eq 0

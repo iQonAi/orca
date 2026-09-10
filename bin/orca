@@ -303,12 +303,15 @@ esac
 # --- 5. instance -------------------------------------------------------------
 # Same slug as the watcher's pidfile. A pid is an incumbent only if it is
 # alive AND its command line is an orca launch (pids get recycled), and it
-# is never this process (a recycled pid could be our own).
+# is never this process (a recycled pid could be our own). An orca launch is
+# a `claude` command token with `--agent orca` or `--agent=orca` after it;
+# `vim orca` or `less notes/orca` at a recycled pid is not one.
 live_orca() {
   case "$1" in '' | *[!0-9]*) return 1 ;; esac
   [ "$1" != "$$" ] || return 1
   kill -0 "$1" 2>/dev/null || return 1
-  ps -ww -o args= -p "$1" 2>/dev/null | grep -qE '(^|[[:space:]/])orca([[:space:]]|$)'
+  ps -ww -o args= -p "$1" 2>/dev/null |
+    grep -qE '(^|[[:space:]/])claude([[:space:]].*)?[[:space:]]--agent(=|[[:space:]]+)orca([[:space:]]|$)'
 }
 record=
 if [ -n "$repo" ]; then
