@@ -89,6 +89,29 @@ Styles:
 Both styles also install the launcher, `bin/orca`, to `~/.local/bin/orca`
 (`ORCA_BIN`); it is how a session is started (see [Usage](#usage)).
 
+`~/.local/bin` has to be on `PATH`, and ahead of `/usr/bin`. GNOME's Orca
+screen reader installs `/usr/bin/orca` (Arch's `orca` package, and its
+equivalent elsewhere), so a `PATH` that appends `~/.local/bin` runs the
+screen reader instead of the launcher. The symptom is distinctive — it
+rejects the launcher's flags, then starts reading the screen:
+
+```
+$ orca --check
+The following are not valid: --check
+```
+
+Check which one you get, and fix the order if it is the wrong one:
+
+```sh
+which -a orca                          # the first hit is the one that runs
+export PATH="$HOME/.local/bin:$PATH"   # prepend, in your shell rc
+```
+
+Prepending is what the systemd file-hierarchy convention asks for anyway, so
+a user install takes precedence. To leave `PATH` alone instead, run the
+launcher by its full path, `~/.local/bin/orca`, or install it with `ORCA_BIN`
+set to a directory already ahead of `/usr/bin`.
+
 Environment overrides:
 
 | Variable      | Default                | Meaning                                        |
