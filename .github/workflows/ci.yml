@@ -57,6 +57,17 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SHFMT_VERSION: v3.14.0
+      # Trust-on-first-use pin of the release asset, recorded 2026-09-10 from
+      # the real download and cross-checked against the digest the GitHub API
+      # reports for that asset. What it buys: the release tag is mutable, so
+      # this stops its contents being swapped under us later. What it does not
+      # buy: any evidence that this capture is the binary upstream intended —
+      # mvdan/sh publishes no signed checksums, and that gap is accepted (#25).
+      # The hash is tied to the version AND the architecture. Bumping
+      # SHFMT_VERSION or moving to arm64 runners changes the artifact, so the
+      # hash must be recaptured in the same commit; the check fails loudly
+      # instead of being silently bypassed.
+      SHFMT_SHA256: fe42021c7272ef2d67ea36cbc3031683c625d0badec733ef3a57b567246a0b66
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -65,6 +76,9 @@ jobs:
         run: |
           curl -fsSL -o /tmp/shfmt \
             "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          # Checked before chmod: a binary that fails the check is never made
+          # executable.
+          echo "${SHFMT_SHA256}  /tmp/shfmt" | sha256sum --check -
           chmod +x /tmp/shfmt
           sudo mv /tmp/shfmt /usr/local/bin/shfmt
           shfmt --version
