@@ -1042,6 +1042,76 @@ run_watch_in "$GH_WATCH_STATE_DIR" 1 "could not write the ignore set $IGN_DIR_FI
 wassert 'gh-watch: the refused write left no temp file orphaned in the directory' \
   test -z "$(ls -A "$IGN_DIR_FILE")"
 
+# THE TEMP FILE IS MADE BY `mktemp`, IN THE STATE DIR. A name built by hand from
+# the pid is predictable, so anything that can write in the state dir can put a
+# symlink there first and the redirect follows it — the set lands wherever the
+# link points. `mktemp` creates the file itself, exclusively, under a name
+# nobody can predict. The template has to sit in the state dir, next to the
+# target: a temp file on another filesystem turns the rename into a copy, and a
+# copy is not atomic, which is the whole point of the dance.
+#
+# The stub records the template and then makes the real file, so a fix that
+# stopped calling `mktemp` leaves an empty log rather than a passing test.
+MKTEMP_BIN="$GH_TMP/mktempbin"
+mkdir -p "$MKTEMP_BIN"
+cat >"$MKTEMP_BIN/mktemp" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"${GH_STUB_MKTEMP_LOG:-/dev/null}"
+[ -n "${GH_STUB_MKTEMP_FAIL-}" ] && exit 1
+exec /usr/bin/mktemp "$@"
+STUB
+chmod +x "$MKTEMP_BIN/mktemp"
+
+IGN_MKTEMP_REPO='octocat/watch-ign-mktemp'
+IGN_MKTEMP_LOG="$GH_TMP/mktemp.log"
+: >"$IGN_MKTEMP_LOG"
+PATH="$MKTEMP_BIN:$STUB_BIN:$PATH" GH_STUB_MKTEMP_LOG="$IGN_MKTEMP_LOG" GH_STUB_OUT='' \
+  "$BASH_BIN" "$WATCH_SCRIPT" --ignore '5' "$IGN_MKTEMP_REPO" >/dev/null 2>&1
+wassert 'gh-watch: --ignore makes its temp file with mktemp, not with a name of its own' \
+  test -s "$IGN_MKTEMP_LOG"
+IGN_MKTEMP_TEMPLATE="$(head -n 1 "$IGN_MKTEMP_LOG")"
+wassert 'gh-watch: the mktemp template sits in the state dir, so the rename is not a copy' \
+  bash -c '[ "${1%/*}" = "$2" ]' _ "$IGN_MKTEMP_TEMPLATE" "$GH_WATCH_STATE_DIR"
+wassert 'gh-watch: the mktemp template ends in the placeholder mktemp fills in' \
+  bash -c '[ "${1##*.}" = "XXXXXX" ]' _ "$IGN_MKTEMP_TEMPLATE" ''
+wassert 'gh-watch: the set written through mktemp is the set that was asked for' \
+  test "$(cat "$(watch_ignorefile "$IGN_MKTEMP_REPO")" 2>/dev/null)" = '5'
+IGN_MKTEMP_LEFT="$(find "$GH_WATCH_STATE_DIR" -maxdepth 1 \
+  -name "$(basename "$(watch_ignorefile "$IGN_MKTEMP_REPO")").*" 2>/dev/null | wc -l | tr -d ' ')"
+wassert 'gh-watch: a successful --ignore left no temp file behind in the state dir' \
+  test "$IGN_MKTEMP_LEFT" -eq 0
+
+# `mktemp` failing is the unwritable-state-dir case reaching the write, and it
+# has to leave through the path that was already there: exit 1, the same
+# message, and the previous set untouched.
+IGN_MKFAIL_REPO='octocat/watch-ign-mktemp-fail'
+run_watch_in "$GH_WATCH_STATE_DIR" 0 'ignoring 6' \
+  'gh-watch: --ignore records the set that a failing mktemp must not disturb' \
+  '' --ignore '6' "$IGN_MKFAIL_REPO"
+IGN_MKFAIL_OUT="$GH_TMP/ign-mkfail.out"
+PATH="$MKTEMP_BIN:$STUB_BIN:$PATH" GH_STUB_MKTEMP_FAIL=1 GH_STUB_OUT='' \
+  "$BASH_BIN" "$WATCH_SCRIPT" --ignore '7' "$IGN_MKFAIL_REPO" >"$IGN_MKFAIL_OUT" 2>&1
+IGN_MKFAIL_RC=$?
+wassert 'gh-watch: a failing mktemp exits 1' test "$IGN_MKFAIL_RC" -eq 1
+wassert 'gh-watch: a failing mktemp reports the message the caller already knows' \
+  grep -qF "could not write the ignore set $(watch_ignorefile "$IGN_MKFAIL_REPO") for $IGN_MKFAIL_REPO" \
+  "$IGN_MKFAIL_OUT"
+wassert 'gh-watch: a failing mktemp left the previous set standing' \
+  test "$(cat "$(watch_ignorefile "$IGN_MKFAIL_REPO")" 2>/dev/null)" = '6'
+
+# The state dir holds the pidfile, the lock and the ignore set, and its default
+# home is $TMPDIR or /tmp. Created with the ambient umask, a permissive one
+# (002, 000 — some CI images and shared boxes set them) leaves it group- or
+# world-writable, and then the predictable-name fix above guards one door in an
+# unlocked house: anyone local could write the ignore set directly and deafen
+# the watcher. Created private, it cannot. `-m` applies only when mkdir CREATES
+# the directory, so an existing state dir keeps whatever mode it has.
+IGN_MODE_DIR="$GH_TMP/private-state"
+(umask 000 && PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' GH_WATCH_STATE_DIR="$IGN_MODE_DIR" \
+  "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-ign-mode' >/dev/null 2>&1)
+wassert 'gh-watch: a state dir it creates is private to the user, whatever the umask' \
+  test "$(ls -ld "$IGN_MODE_DIR" 2>/dev/null | cut -c1-10)" = 'drwx------'
+
 # An UNREADABLE set is not an empty set. The filter fails open — toward waking
 # the caller, which is the safe direction — but silently, and `--status` then
 # answers "no set" for "a set I cannot read". The operator sees wake-ups it

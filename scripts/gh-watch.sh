@@ -111,7 +111,15 @@ state_dir="${GH_WATCH_STATE_DIR:-${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/gh-watch-$(
 if [ "$mode" != status ]; then
   # `mkdir -p` RETURNS 0 for a directory that already exists but is unusable,
   # so its exit status alone is not a guard — check the properties we need.
-  mkdir -p "$state_dir" 2>/dev/null
+  #
+  # PRIVATE when we create it. The default home is $TMPDIR or /tmp, and this
+  # directory holds the pidfile, the lock and the ignore set: created with the
+  # ambient umask, a permissive one (002, 000) leaves it group- or
+  # world-writable, and anyone local could then write the ignore set and deafen
+  # the watcher, or plant a pidfile and stop it starting. `-m` applies only when
+  # mkdir CREATES the directory, so an existing state dir keeps the mode it has
+  # — nobody's working setup changes under them.
+  mkdir -p -m 700 "$state_dir" 2>/dev/null
   { [ -d "$state_dir" ] && [ -w "$state_dir" ] && [ -x "$state_dir" ]; } || {
     echo "watcher state dir $state_dir is not a writable directory"
     exit 1
@@ -269,12 +277,27 @@ if [ "$mode" = ignore ]; then
   # that is briefly missing numbers the caller owns — which fires. Writing a
   # temp file in the same directory and renaming it means every read sees
   # either the old set or the new one.
-  ignore_tmp="$ignore_file.$$.tmp"
+  #
+  # `mktemp` names the temp file, and creates it, exclusively. A name built here
+  # from the pid is predictable, so anyone who can write in the state dir can
+  # put something at that path first — a symlink, which the redirect below would
+  # follow, writing the set wherever the link points, as this user.
+  #
+  # The template is the TARGET's own path plus the placeholder, so the temp file
+  # is created beside the file it replaces. `mktemp` with no template lands in
+  # $TMPDIR, which can be another filesystem, and `mv` across filesystems is a
+  # copy — no longer the atomic rename this whole dance exists for.
+  #
+  # A failed `mktemp` (an unwritable state dir reaching this far) leaves
+  # $ignore_tmp empty and takes the same exit as a failed write: same message,
+  # same code, previous set untouched.
+  ignore_tmp="$(mktemp "$ignore_file.XXXXXX" 2>/dev/null)"
   {
-    (printf '%s\n' "$ignore_set" >"$ignore_tmp") 2>/dev/null &&
+    [ -n "$ignore_tmp" ] &&
+      (printf '%s\n' "$ignore_set" >"$ignore_tmp") 2>/dev/null &&
       mv -f "$ignore_tmp" "$ignore_file" 2>/dev/null
   } || {
-    rm -f "$ignore_tmp" 2>/dev/null
+    [ -n "$ignore_tmp" ] && rm -f "$ignore_tmp" 2>/dev/null
     echo "could not write the ignore set $ignore_file for $repo"
     exit 1
   }
