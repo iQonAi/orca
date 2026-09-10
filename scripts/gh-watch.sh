@@ -242,7 +242,17 @@ snapshot() {
 # Seconds between a poll that differs from the baseline and the fetch that has
 # to differ from it too before the watcher exits. It is the whole cost of the
 # confirm, paid only on a differing poll; only the tests need to change it.
+# Validated here rather than at the point of use: an unusable value reaches
+# `sleep`, which fails, prints its usage into the output the orchestrator reads,
+# and leaves no gap between the two fetches at all — the confirm degrades to
+# nothing, silently, in the one direction that matters.
 confirm_delay="${GH_WATCH_CONFIRM_DELAY:-5}"
+case "$confirm_delay" in
+  '' | 0 | *[!0-9]*)
+    echo "GH_WATCH_CONFIRM_DELAY '$confirm_delay' is not a positive integer; using 5" >&2
+    confirm_delay=5
+    ;;
+esac
 base=$(snapshot) || base=""
 [ -z "$base" ] && {
   echo "baseline fetch failed for $repo"

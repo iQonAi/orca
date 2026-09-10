@@ -553,6 +553,25 @@ wassert 'gh-watch: it fired on the SECOND poll, having consumed all five answers
 wassert 'gh-watch: firing after a failed confirming fetch released the pidfile' \
   test ! -e "$(watch_pidfile 'octocat/watch-retry')"
 
+# The confirm delay is validated before the loop. Unvalidated, a non-numeric
+# value reaches `sleep`, which fails, prints its usage into the watcher's output
+# (which is what the orchestrator reads) and collapses the confirm gap to about
+# nothing — degrading silently, and in the one direction that matters.
+BADDELAY_OUT="$GH_TMP/baddelay.out"
+BADDELAY_ERR="$GH_TMP/baddelay.err"
+PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' GH_WATCH_CONFIRM_DELAY='oops' \
+  "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-baddelay' >"$BADDELAY_OUT" 2>"$BADDELAY_ERR"
+wassert 'gh-watch: a non-numeric GH_WATCH_CONFIRM_DELAY is rejected with a message on stderr' \
+  grep -q 'GH_WATCH_CONFIRM_DELAY' "$BADDELAY_ERR"
+wassert 'gh-watch: rejecting the confirm delay leaves stdout to the script itself' \
+  test "$(cat "$BADDELAY_OUT")" = 'baseline fetch failed for octocat/watch-baddelay'
+
+OKDELAY_ERR="$GH_TMP/okdelay.err"
+PATH="$STUB_BIN:$PATH" GH_STUB_OUT='' GH_WATCH_CONFIRM_DELAY='7' \
+  "$BASH_BIN" "$WATCH_SCRIPT" 'octocat/watch-okdelay' >/dev/null 2>"$OKDELAY_ERR"
+wassert 'gh-watch: a valid GH_WATCH_CONFIRM_DELAY is accepted without a message' \
+  test ! -s "$OKDELAY_ERR"
+
 reap_live_watchers
 unset GH_WATCH_STATE_DIR
 
