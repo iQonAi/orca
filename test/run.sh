@@ -1896,6 +1896,22 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   run_orca "$REPO_SSH"
   wassert 'launcher: a gh warning beside a successful api user refuses the launch' test "$ORCA_RC" -eq 1
   orca_not_said 'launcher: a gh warning beside a successful api user reaches no git identity' 'GIT_AUTHOR_EMAIL='
+  # a warning with no space in it is absorbed by the login and leaves the id
+  # numeric: the login's own shape is what catches it, before it can reach
+  # the permission API path or the git identity
+  : >"$L_CALLS"
+  ORCA_ENV=(ORCA_STUB_WARN='deprecated' ORCA_STUB_CALLS="$L_CALLS")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a spaceless gh warning beside a successful api user fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a spaceless gh warning beside a successful api user is named' \
+    'fail: identity: unexpected gh api user output'
+  orca_not_said 'launcher: a spaceless gh warning beside a successful api user names no login' 'ok: running as'
+  wassert 'launcher: a spaceless gh warning beside a successful api user reaches no permission call' \
+    bash -c "! grep -q collaborators '$L_CALLS'"
+  ORCA_ENV=(ORCA_STUB_WARN='deprecated')
+  run_orca "$REPO_SSH"
+  wassert 'launcher: a spaceless gh warning beside a successful api user refuses the launch' test "$ORCA_RC" -eq 1
+  orca_not_said 'launcher: a spaceless gh warning beside a successful api user reaches no git identity' 'GIT_AUTHOR_EMAIL='
 
   # 3. repo: the permission must be write or better; no origin is named
   ORCA_ENV=(ORCA_STUB_PERM=read)
