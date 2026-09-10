@@ -564,6 +564,14 @@ printf '%s\n' '1 2026-09-09T10:00:00Z' '1 2026-09-09T10:02:00Z' \
 run_watch_seq 0 'CHANGE DETECTED' \
   'gh-watch: a change confirmed against the baseline fires (exit 0)' \
   'octocat/watch-real' "$SEQ_REAL"
+# The CALL COUNT is what pins the comparison down; the exit code cannot. Compare
+# the confirming answer with $cur instead of with the baseline and the watcher
+# still fires on this sequence — it just declines the first differing poll and
+# fires on the next one, with the same exit code and the same output. Three
+# answers consumed means it fired on the FIRST differing poll: baseline, the
+# poll that differed, the fetch that confirmed it.
+wassert 'gh-watch: it fired on the FIRST differing poll, having consumed three answers' \
+  test "$(cat "$SEQ_REAL.n" 2>/dev/null)" = 4
 wassert 'gh-watch: firing on a confirmed change released the pidfile' \
   test ! -e "$(watch_pidfile 'octocat/watch-real')"
 
