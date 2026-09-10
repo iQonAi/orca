@@ -265,12 +265,16 @@ trap 'release; exit 0' INT TERM HUP
 # first issue arriving is the thing worth waking up for.
 snapshot() {
   local issues prs
+  # stderr is dropped, as it was on the call this replaced: the exit status
+  # already says "no answer", and a listing that is failing fails on every poll
+  # — 110 copies of the same gh error in the output the orchestrator reads. A
+  # failure that is not transient is caught by the baseline, which does report.
   issues=$(gh issue list --repo "$repo" --state open --limit 50 \
     --json number,updatedAt,labels \
-    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"') || return 1
+    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"' 2>/dev/null) || return 1
   prs=$(gh pr list --repo "$repo" --state open --limit 50 \
     --json number,updatedAt,labels \
-    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"') || return 1
+    --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"' 2>/dev/null) || return 1
   {
     [ -n "$issues" ] && printf '%s\n' "$issues"
     [ -n "$prs" ] && printf '%s\n' "$prs"
