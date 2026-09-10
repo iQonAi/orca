@@ -88,17 +88,30 @@ pidfile="$state_dir/$(printf '%s' "$repo" | tr -c 'A-Za-z0-9._-' '_').pid"
 repo_re="$(printf '%s' "$repo" | sed 's/[]\.[*^$+?(){}|]/\\&/g')"
 
 # Is $1 a live watcher FOR THIS REPO? (pid alive is not enough: pids get
-# recycled.) The match is anchored on the script name AND the repo argument,
-# because an unanchored `gh-watch` substring test matches far more than real
-# watchers — editors, greps, and above all the harness's own wrapper shell,
-# which is the classic self-match bug. The trailing alternative with no repo
-# argument covers a watcher launched with the repo auto-detected from cwd:
-# only such a watcher for THIS repo can have written this repo's pidfile.
+# recycled.) The match is anchored on the script name and on the end of the
+# command line, because an unanchored `gh-watch` substring test matches far
+# more than real watchers — editors, greps, and above all the harness's own
+# wrapper shell, which is the classic self-match bug. The trailing alternative
+# with no repo argument covers a watcher launched with the repo auto-detected
+# from cwd: only such a watcher for THIS repo can have written this repo's
+# pidfile.
+#
 # Mode words are allowed generically, not one by one: a watcher launched as
 # `gh-watch.sh --takeover <repo>` keeps that word in its argv for the rest of
 # its life, and matching only the bare form answered "none running" about a
-# watcher that was polling (#30). `--[A-Za-z-]+` cannot swallow the repo
-# argument, which carries a `/`, so the anchoring is unweakened.
+# watcher that was polling (#30). Two limits on that are worth stating plainly:
+#
+#   - The match set really did grow. `gh-watch.sh --status`, a wrapper
+#     `sh -c '... gh-watch.sh --status'` and `vim scripts/gh-watch.sh --nofork`
+#     all match now, and --status runs are frequent (the playbook calls one per
+#     cycle). What keeps this safe is NOT the anchoring: it is that
+#     live_watcher() is only ever asked about a pid read from THIS repo's own
+#     pidfile, so a wrong answer needs that pid to have been recycled onto one
+#     of those processes.
+#   - "A mode word added later needs no second fix here" holds only for a
+#     VALUELESS long flag. `--interval 60`, `--delay=5` and every short flag
+#     fail to match, and would each need this pattern widened again.
+#
 # `-ww` is required — BSD `ps` truncates the command column to terminal width.
 live_watcher() {
   [ -n "${1:-}" ] || return 1
