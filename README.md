@@ -158,14 +158,18 @@ Bot identity, above, is the GitHub token's scopes. This section is a
 different thing: Claude Code's own tool-use allowlist, the one that decides
 whether orca can run a command without a permission prompt.
 
-Orca's worker lifecycle needs three `gh` subcommand groups pre-approved in
+Orca's worker lifecycle needs these `gh` subcommand groups pre-approved in
 `permissions.allow`, in `~/.claude/settings.json`:
 
 ```json
 "Bash(gh pr *)",
 "Bash(gh issue *)",
-"Bash(gh api *)"
+"Bash(gh api *)",
+"Bash(gh repo view*)"
 ```
+
+`gh repo view` is separate from the other three: orca and the watcher both
+run it at startup to detect the repo from the current directory.
 
 Orca cannot add these itself, even with your explicit go-ahead in chat.
 Editing its own permission grants is a hard safety boundary, and it holds
