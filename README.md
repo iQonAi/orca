@@ -152,6 +152,25 @@ worker inherit them; nothing else on the machine changes account. The token
 file is yours: install, `--uninstall` and `--restore` never create, back up,
 or remove it, and the launcher never prints it.
 
+### Claude Code permissions
+
+Bot identity, above, is the GitHub token's scopes. This section is a
+different thing: Claude Code's own tool-use allowlist, the one that decides
+whether orca can run a command without a permission prompt.
+
+Orca's worker lifecycle needs three `gh` subcommand groups pre-approved in
+`permissions.allow`, in `~/.claude/settings.json`:
+
+```json
+"Bash(gh pr *)",
+"Bash(gh issue *)",
+"Bash(gh api *)"
+```
+
+Orca cannot add these itself, even with your explicit go-ahead in chat.
+Editing its own permission grants is a hard safety boundary, and it holds
+regardless of conversational approval. Add them by hand.
+
 ### Uninstall
 
 ```sh
