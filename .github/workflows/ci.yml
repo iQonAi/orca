@@ -47,6 +47,7 @@ jobs:
             install.sh \
             bin/orca \
             scripts/gh-watch.sh \
+            scripts/orca-project.sh \
             hooks/orca-start-watcher.sh
 
   # Its own job, not a step next to shellcheck: a failing step aborts the rest
@@ -92,5 +93,6 @@ jobs:
             install.sh \
             bin/orca \
             scripts/gh-watch.sh \
+            scripts/orca-project.sh \
             hooks/orca-start-watcher.sh \
             test/run.sh

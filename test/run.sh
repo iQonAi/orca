@@ -6,7 +6,9 @@
 #   hooks/orca-start-watcher.sh  (SessionStart directive injection)
 #   scripts/gh-watch.sh          (single-instance-per-repo watcher)
 #   install.sh                   (both styles, --uninstall, --restore)
-#   bin/orca                     (the launcher: preflight checks, identity)
+#   bin/orca                     (the launcher: preflight checks, identity,
+#                                 orca init)
+#   scripts/orca-project.sh      (the project data reader)
 #
 # Hermetic: temp git repos stand in for workspaces, a stub `gh` (and, for the
 # launcher, a stub `claude`) on PATH replaces the network, and
@@ -2443,7 +2445,7 @@ trap 'reap_live_watchers; reap_live_orcas; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/
 L_SYS="$L_TMP/sys"
 mkdir -p "$L_SYS"
 L_SHIM_OK=1
-for t in sh bash git jq ps grep tr stat cat readlink mkdir rm sleep; do
+for t in sh bash git jq ps grep tr stat cat readlink mkdir rm sleep mktemp cp; do
   p="$(command -v "$t")" && ln -s "$p" "$L_SYS/$t" || L_SHIM_OK=0
 done
 L_STUBS="$L_TMP/stubs"
@@ -2455,6 +2457,7 @@ cat >"$L_STUBS/gh" <<'STUB'
 # (the permission from ORCA_STUB_PERM, default admin), applying --jq with real
 # jq. ORCA_STUB_CALLS names a file each call's arguments are appended to.
 # ORCA_STUB_WARN is printed on stderr beside a successful `api user`.
+# `pr create --repo <o>/<r> ...` prints the URL of PR 1 on that repo.
 jq_expr=
 args=()
 while [ $# -gt 0 ]; do
@@ -2478,6 +2481,13 @@ case "${args[0]-} ${args[1]-}" in
     [ -n "${ORCA_STUB_WARN:-}" ] && printf '%s\n' "$ORCA_STUB_WARN" >&2
     ;;
   api\ repos/*/collaborators/orca-bot/permission) body="{\"permission\":\"${ORCA_STUB_PERM:-admin}\"}" ;;
+  'pr create')
+    pr_repo=
+    for ((i = 2; i < ${#args[@]}; i++)); do
+      [ "${args[i]}" = --repo ] && pr_repo=${args[i + 1]-}
+    done
+    body="https://github.com/$pr_repo/pull/1"
+    ;;
   *)
     echo "stub gh: unexpected call: ${args[*]}" >&2
     exit 1
@@ -2987,6 +2997,238 @@ wassert 'restore: puts the previous launcher back' bash -c "grep -q 'previous la
 wassert 'restore: leaves the token file and its contents untouched' \
   test "$(cat "$L_HOME_TOK/.config/orca/token")" = keep-me
 wassert 'restore: leaves the token file mode 0600' test "$(tmode "$L_HOME_TOK/.config/orca/token")" = 600
+
+# ---------------------------------------------------------------------------
+# scripts/orca-project.sh — the project data reader — and orca init
+#
+# Hermetic: temp git repos whose origin remote is never contacted. For orca
+# init the origin also has a pushurl to a local bare repository, so the push
+# lands on disk, and the launcher's stub gh answers `pr create`.
+
+READER="$REPO_ROOT/scripts/orca-project.sh"
+P_TMP="$(mktemp -d)"
+trap 'reap_live_watchers; reap_live_orcas; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/null; rm -rf "$WATCHER_TMP" "$GH_TMP" "$INST_TMP" "$L_TMP" "$P_TMP"' EXIT
+
+# p_repo <dir> — a git repo with an origin remote and no project file
+p_repo() {
+  mkdir -p "$1"
+  git -C "$1" init -q
+  git -C "$1" remote add origin 'git@github.com:octocat/proj.git'
+}
+# p_file <dir> <content> — writes <dir>/.orca/project.json
+p_file() {
+  mkdir -p "$1/.orca"
+  printf '%s\n' "$2" >"$1/.orca/project.json"
+}
+# run_reader <dir> <field> — stdout in P_OUT, stderr in P_ERR, exit in P_RC
+run_reader() {
+  P_OUT="$(cd "$1" && sh "$READER" "$2" 2>"$P_TMP/stderr")"
+  P_RC=$?
+  P_ERR="$(cat "$P_TMP/stderr")"
+}
+# reader_ok <desc> <dir> <field> <value> — exits 0 and prints exactly value
+reader_ok() {
+  run_reader "$2" "$3"
+  wassert "$1" test "$P_RC:$P_OUT:$P_ERR" = "0:$4:"
+}
+# reader_fails <desc> <dir> <field> <stderr substring> — exits 1, prints
+# nothing on stdout, and names the reason on stderr
+reader_fails() {
+  run_reader "$2" "$3"
+  wassert "$1 (exit 1, nothing on stdout)" test "$P_RC:$P_OUT" = "1:"
+  if [[ "$P_ERR" == *"$4"* ]]; then
+    printf 'ok:   %s\n' "$1 (names the reason)"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL: %s\n      stderr missing: %s\n      got: %s\n' "$1 (names the reason)" "$4" "$P_ERR" >&2
+    fail=$((fail + 1))
+  fi
+}
+
+# a valid GitHub file
+P_GH="$P_TMP/gh"
+p_repo "$P_GH"
+p_file "$P_GH" '{"version":1,"name":"Hello","tracker":"github","github":{"repo":"octocat/hello-world"}}'
+reader_ok 'reader: a GitHub file gives its tracker' "$P_GH" tracker github
+reader_ok 'reader: a GitHub file gives its name' "$P_GH" name Hello
+reader_ok 'reader: github.repo comes from the file, not the remote' "$P_GH" github.repo octocat/hello-world
+reader_fails 'reader: linear.team is not set for a GitHub file' "$P_GH" linear.team \
+  'linear.team is not set (the tracker is github)'
+mkdir -p "$P_GH/sub/dir"
+reader_ok 'reader: finds the file at the git root from a subdirectory' "$P_GH/sub/dir" name Hello
+
+# a valid Linear file, with and without a project
+P_LIN="$P_TMP/linear"
+p_repo "$P_LIN"
+p_file "$P_LIN" '{"version":1,"name":"Devbox","tracker":"linear","github":{"repo":"iQonAi/devbox-control-plane"},"linear":{"team":"IQONAI","project":"Devbox"}}'
+reader_ok 'reader: a Linear file gives its tracker' "$P_LIN" tracker linear
+reader_ok 'reader: a Linear file gives github.repo' "$P_LIN" github.repo iQonAi/devbox-control-plane
+reader_ok 'reader: a Linear file gives linear.team' "$P_LIN" linear.team IQONAI
+reader_ok 'reader: a Linear file gives linear.project' "$P_LIN" linear.project Devbox
+P_LIN2="$P_TMP/linear-noproject"
+p_repo "$P_LIN2"
+p_file "$P_LIN2" '{"version":1,"name":"Devbox","tracker":"linear","github":{"repo":"iQonAi/devbox-control-plane"},"linear":{"team":"IQONAI"}}'
+reader_ok 'reader: a Linear file without a project gives linear.team' "$P_LIN2" linear.team IQONAI
+reader_ok 'reader: a Linear file without a project gives an empty linear.project' "$P_LIN2" linear.project ''
+
+# no file: tracker github, the repo from the origin remote
+P_NONE="$P_TMP/none"
+p_repo "$P_NONE"
+reader_ok 'reader: no file defaults the tracker to github' "$P_NONE" tracker github
+reader_ok 'reader: no file takes github.repo from the origin remote' "$P_NONE" github.repo octocat/proj
+reader_ok 'reader: no file takes the name from the repository' "$P_NONE" name proj
+reader_fails 'reader: no file leaves linear.team unset' "$P_NONE" linear.team 'linear.team is not set'
+P_NOREMOTE="$P_TMP/noremote"
+mkdir -p "$P_NOREMOTE"
+git -C "$P_NOREMOTE" init -q
+reader_fails 'reader: no file and no origin remote fails' "$P_NOREMOTE" github.repo 'no origin remote'
+P_NOGIT="$P_TMP/nogit"
+mkdir -p "$P_NOGIT"
+reader_fails 'reader: outside a git repository fails' "$P_NOGIT" tracker 'not inside a git repository'
+
+# broken files: an error and exit 1, never the no-file defaults
+P_BAD="$P_TMP/bad"
+p_repo "$P_BAD"
+p_file "$P_BAD" '{"version":1,"name":"Hello",'
+reader_fails 'reader: malformed JSON fails' "$P_BAD" tracker 'could not read'
+p_file "$P_BAD" ''
+reader_fails 'reader: an empty file fails' "$P_BAD" tracker 'must hold exactly one JSON object'
+p_file "$P_BAD" '{"version":1,"name":"Hello","tracker":"jira","github":{"repo":"octocat/hello-world"}}'
+reader_fails 'reader: an unknown tracker fails' "$P_BAD" tracker 'unknown tracker "jira" (github or linear)'
+p_file "$P_BAD" '{"version":1,"name":"Hello","github":{"repo":"octocat/hello-world"}}'
+reader_fails 'reader: a missing tracker fails' "$P_BAD" name 'tracker is missing'
+p_file "$P_BAD" '{"version":1,"name":"Devbox","tracker":"linear","github":{"repo":"iQonAi/devbox-control-plane"},"linear":{"project":"Devbox"}}'
+reader_fails 'reader: Linear with no team fails' "$P_BAD" tracker 'linear.team must be a non-empty string'
+p_file "$P_BAD" '{"version":1,"name":"Devbox","tracker":"linear","github":{"repo":"iQonAi/devbox-control-plane"}}'
+reader_fails 'reader: Linear with no linear object fails' "$P_BAD" github.repo 'linear.team is required'
+p_file "$P_BAD" '{"version":1,"name":"Hello","tracker":"github"}'
+reader_fails 'reader: a missing github.repo fails' "$P_BAD" tracker 'github.repo is required'
+p_file "$P_BAD" '{"version":1,"name":"Hello","tracker":"github","github":{"repo":"octocat/hello/world"}}'
+reader_fails 'reader: a github.repo that is not owner/repo fails' "$P_BAD" tracker 'github.repo must be owner/repo'
+p_file "$P_BAD" '{"version":2,"name":"Hello","tracker":"github","github":{"repo":"octocat/hello-world"}}'
+reader_fails 'reader: an unknown version fails' "$P_BAD" tracker 'version must be 1'
+run_reader "$P_GH" owner
+wassert 'reader: an unknown field is a usage error (exit 2)' test "$P_RC" -eq 2
+
+# install.sh installs the reader beside the watcher, and uninstall removes it
+P_IH1="$P_TMP/ih1"
+mkdir -p "$P_IH1"
+ORCA_STYLE=claude HOME="$P_IH1" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: claude style links the reader beside the watcher' \
+  test "$(readlink "$P_IH1/.claude/scripts/orca-project.sh")" = "$READER"
+HOME="$P_IH1" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'uninstall: removes the claude-style reader' \
+  bash -c "test ! -e '$P_IH1/.claude/scripts/orca-project.sh' && test ! -L '$P_IH1/.claude/scripts/orca-project.sh'"
+P_IH2="$P_TMP/ih2"
+mkdir -p "$P_IH2"
+ORCA_STYLE=agents HOME="$P_IH2" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+wassert 'install: agents style links the reader beside gh-watch' \
+  test "$(readlink "$P_IH2/.local/bin/orca-project")" = "$READER"
+HOME="$P_IH2" sh "$INSTALL_SH" --uninstall </dev/null >/dev/null 2>&1
+wassert 'uninstall: removes the agents-style reader' \
+  bash -c "test ! -e '$P_IH2/.local/bin/orca-project' && test ! -L '$P_IH2/.local/bin/orca-project'"
+
+# orca init, through the launcher's shim PATH and stub gh. Each case gets a
+# repo with one commit on main, an origin on GitHub and a pushurl to a local
+# bare repository.
+# p_init_repo <dir>
+p_init_repo() {
+  git init -q -b main "$1"
+  git -C "$1" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
+  git init -q --bare "$1.git"
+  git -C "$1" remote add origin 'git@github.com:octocat/proj.git'
+  git -C "$1" config remote.origin.pushurl "$1.git"
+}
+# run_init <dir> <answers> — orca init with the answers on stdin, as the
+# user's own gh and git identity; gh calls land in <dir>.calls
+run_init() {
+  ORCA_ENV=(GH_TOKEN=ghp_stubtoken ORCA_STUB_CALLS="$1.calls"
+    GIT_AUTHOR_NAME=tester GIT_AUTHOR_EMAIL=tester@example.com
+    GIT_COMMITTER_NAME=tester GIT_COMMITTER_EMAIL=tester@example.com)
+  run_orca "$1" init <<<"$2"
+}
+if [[ "$L_SHIM_OK" == 1 ]]; then
+  # every proposal kept: a GitHub file on the branch, a PR, main untouched
+  P_I1="$P_TMP/init-gh"
+  p_init_repo "$P_I1"
+  P_I1_MAIN="$(git -C "$P_I1" rev-parse main)"
+  run_init "$P_I1" $'\n\n\n'
+  wassert 'init: keeping every proposal exits 0' test "$ORCA_RC" -eq 0
+  orca_said 'init: proposes the name from the remote' 'name [proj]: '
+  orca_said 'init: proposes the github tracker' 'tracker [github]: '
+  orca_said 'init: proposes the repo from the remote' 'github.repo [octocat/proj]: '
+  orca_not_said 'init: asks no Linear question for the github tracker' 'linear.team'
+  orca_said 'init: names the branch and the PR' \
+    'wrote .orca/project.json on chore/orca-init and opened https://github.com/octocat/proj/pull/1'
+  wassert 'init: the branch holds the file with the proposed values' \
+    test "$(git -C "$P_I1" show chore/orca-init:.orca/project.json | jq -c .)" = \
+    '{"version":1,"name":"proj","tracker":"github","github":{"repo":"octocat/proj"}}'
+  wassert 'init: the branch adds only the project file, on top of main' \
+    test "$(git -C "$P_I1" diff --name-only main chore/orca-init)" = .orca/project.json
+  wassert 'init: the branch is one commit ahead of main' \
+    test "$(git -C "$P_I1" rev-list --count main..chore/orca-init)" = 1
+  wassert 'init: the branch is pushed to origin' \
+    git -C "$P_I1.git" rev-parse -q --verify refs/heads/chore/orca-init
+  wassert 'init: calls gh pr create for the origin repo and the branch' \
+    grep -qF 'pr create --repo octocat/proj --head chore/orca-init' "$P_I1.calls"
+  wassert 'init: never moves main' test "$(git -C "$P_I1" rev-parse main)" = "$P_I1_MAIN"
+  wassert 'init: never pushes main' bash -c "! git -C '$P_I1.git' rev-parse -q --verify refs/heads/main"
+  wassert 'init: leaves main checked out' test "$(git -C "$P_I1" symbolic-ref --short HEAD)" = main
+  wassert 'init: leaves the working tree clean, with no project file' \
+    bash -c "test -z \"\$(git -C '$P_I1' status --porcelain)\" && test ! -e '$P_I1/.orca'"
+  wassert 'init: removes its worktree after the PR' \
+    test "$(git -C "$P_I1" worktree list --porcelain | grep -c '^worktree ')" = 1
+
+  # a Linear project, with every value typed
+  P_I2="$P_TMP/init-linear"
+  p_init_repo "$P_I2"
+  run_init "$P_I2" $'Devbox\nlinear\niQonAi/devbox-control-plane\nIQONAI\nDevbox'
+  wassert 'init: a Linear project exits 0' test "$ORCA_RC" -eq 0
+  orca_said 'init: asks for the Linear team' 'linear.team: '
+  wassert 'init: the branch holds the Linear values' \
+    test "$(git -C "$P_I2" show chore/orca-init:.orca/project.json | jq -c .)" = \
+    '{"version":1,"name":"Devbox","tracker":"linear","github":{"repo":"iQonAi/devbox-control-plane"},"linear":{"team":"IQONAI","project":"Devbox"}}'
+
+  # an answer the reader rejects: its reason, and nothing written anywhere
+  P_I3="$P_TMP/init-bad"
+  p_init_repo "$P_I3"
+  run_init "$P_I3" $'\njira\n'
+  wassert 'init: an unknown tracker exits 1' test "$ORCA_RC" -eq 1
+  orca_said 'init: an unknown tracker is named by the reader' 'unknown tracker "jira" (github or linear); nothing written'
+  wassert 'init: a rejected answer creates no branch' \
+    bash -c "! git -C '$P_I3' rev-parse -q --verify refs/heads/chore/orca-init"
+  wassert 'init: a rejected answer opens no PR' bash -c "! grep -q 'pr create' '$P_I3.calls' 2>/dev/null"
+
+  # end of input before the last answer: nothing written
+  P_I4="$P_TMP/init-eof"
+  p_init_repo "$P_I4"
+  run_orca "$P_I4" init </dev/null
+  wassert 'init: end of input exits 1' test "$ORCA_RC" -eq 1
+  orca_said 'init: end of input is named' 'no answer for name (end of input); nothing written'
+  wassert 'init: end of input creates no branch' \
+    bash -c "! git -C '$P_I4' rev-parse -q --verify refs/heads/chore/orca-init"
+
+  # the file exists: refused before the first question
+  P_I5="$P_TMP/init-exists"
+  p_init_repo "$P_I5"
+  p_file "$P_I5" '{"version":1,"name":"Mine","tracker":"github","github":{"repo":"octocat/proj"}}'
+  run_init "$P_I5" $'\n\n\n'
+  wassert 'init: an existing file exits 1' test "$ORCA_RC" -eq 1
+  orca_said 'init: an existing file is named' "$P_I5/.orca/project.json already exists"
+  orca_not_said 'init: an existing file is refused before any question' 'name ['
+  wassert 'init: an existing file is left as it was' \
+    test "$(jq -r .name "$P_I5/.orca/project.json")" = Mine
+  wassert 'init: an existing file creates no branch' \
+    bash -c "! git -C '$P_I5' rev-parse -q --verify refs/heads/chore/orca-init"
+  wassert 'init: an existing file opens no PR' bash -c "! grep -q 'pr create' '$P_I5.calls' 2>/dev/null"
+
+  # a branch left by an earlier run: refused, never reused
+  run_init "$P_I1" $'\n\n\n'
+  wassert 'init: an existing branch exits 1' test "$ORCA_RC" -eq 1
+  orca_said 'init: an existing branch is named' 'branch chore/orca-init already exists'
+else
+  printf 'skip: orca init cases (could not build a PATH shim)\n'
+fi
 
 # ---------------------------------------------------------------------------
 
