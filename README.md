@@ -289,7 +289,8 @@ fails, naming every failure in one run:
 3. the repository, detected from the checkout's `origin` remote
    (`--repo owner/repo` overrides), and the bot's permission on it — write,
    maintain or admin;
-4. the installed files resolve to real files (a dangling symlink is named
+4. the installed files — the playbook, the hook, the watcher and the
+   project data reader — resolve to real files (a dangling symlink is named
    with its target) and, claude style, the `SessionStart` hook is wired in
    `settings.json`;
 5. no other orca holds this repository
@@ -355,14 +356,19 @@ To write the file, run this from the project:
 orca init
 ```
 
-It refuses to run when `.orca/project.json` already exists, or when the
-branch `chore/orca-init` does. It proposes each value from the `origin`
-remote; press enter to keep a proposal or type a new value. The reader checks
-the answers before anything is written. Then `orca init` commits the file on
-the new branch `chore/orca-init`, branched from `HEAD` in a worktree of its
-own, pushes the branch to `origin`, and opens a PR with `gh pr create`. The
-branch you have checked out and your working tree do not change, so the file
-reaches `main` only through that PR. The push and the PR use your own `git`
+It first fetches the default branch from `origin`. It refuses to run when
+`.orca/project.json` already exists in your working tree, in `HEAD` or on
+`origin`'s default branch, or when the branch `chore/orca-init` exists
+locally or on `origin`. All of these checks run before the first question.
+It proposes each value from the `origin` remote; press enter to keep a
+proposal or type a new value. The reader checks the answers before anything
+is written. Then `orca init` commits the file on the new branch
+`chore/orca-init`, branched from `origin`'s default branch in a worktree of
+its own, pushes the branch to `origin`, and opens a PR against the default
+branch with `gh pr create`. Commits on the branch you have checked out are
+never pushed or put in the PR, even when you run it from a feature branch.
+That branch and your working tree do not change, so the file reaches the
+default branch only through the PR. The push and the PR use your own `git`
 and `gh` credentials, not the bot's token.
 
 ### gh-watch.sh exit codes

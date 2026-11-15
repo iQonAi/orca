@@ -2590,7 +2590,7 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: --check resolves the repo from an SSH origin and reports the permission' \
     'ok: repo: octocat/hello-world (orca-bot has admin access)'
   orca_said 'launcher: --check reports the installed files' \
-    "ok: install: claude style; playbook, hook and watcher in place under $L_HOME/.claude"
+    "ok: install: claude style; playbook, hook, watcher and project reader in place under $L_HOME/.claude"
   orca_said 'launcher: --check reports the wired hook' "ok: install: SessionStart hook wired in $L_HOME/.claude/settings.json"
   orca_said 'launcher: --check reports no other instance' 'ok: instance: no other orca running for octocat/hello-world'
   orca_said 'launcher: --check says all checks passed' 'all checks passed'
@@ -2764,7 +2764,7 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: the missing hook entry is named' \
     "fail: install: no SessionStart hook for orca-start-watcher.sh in $L_CH_NOHOOK/settings.json"
   orca_said 'launcher: the installed files pass beside the missing hook entry' \
-    "ok: install: claude style; playbook, hook and watcher in place under $L_CH_NOHOOK"
+    "ok: install: claude style; playbook, hook, watcher and project reader in place under $L_CH_NOHOOK"
   # a hand-wired entry with extra keys still counts, as it does for install.sh
   printf '{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"%s/hooks/orca-start-watcher.sh","timeout":10}]}]}}\n' \
     "$L_CH_NOHOOK" >"$L_CH_NOHOOK/settings.json"
@@ -2786,7 +2786,7 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   ORCA_ENV=(HOME="$L_HOME_AGENTS" XDG_CONFIG_HOME="$L_HOME_AGENTS/.config" ORCA_BIN="$L_OBIN_AGENTS" ORCA_TOKEN_FILE="$L_TOKEN")
   run_orca "$REPO_SSH" --check
   wassert 'launcher: an agents-style install passes --check' test "$ORCA_RC" -eq 0
-  orca_said 'launcher: the agents style is detected from its own files' 'ok: install: agents style; watcher and playbook in place'
+  orca_said 'launcher: the agents style is detected from its own files' 'ok: install: agents style; watcher, project reader and playbook in place'
   ORCA_ENV=(ORCA_STYLE=agents)
   run_orca "$REPO_SSH" --check
   wassert 'launcher: ORCA_STYLE overrides the detected style' test "$ORCA_RC" -eq 1
@@ -3002,8 +3002,10 @@ wassert 'restore: leaves the token file mode 0600' test "$(tmode "$L_HOME_TOK/.c
 # scripts/orca-project.sh — the project data reader — and orca init
 #
 # Hermetic: temp git repos whose origin remote is never contacted. For orca
-# init the origin also has a pushurl to a local bare repository, so the push
-# lands on disk, and the launcher's stub gh answers `pr create`.
+# init, url.<bare>.insteadOf points the GitHub origin at a local bare
+# repository, so the fetch and the push stay on disk while the remote URL the
+# reader parses is still the GitHub one, and the launcher's stub gh answers
+# `pr create`.
 
 READER="$REPO_ROOT/scripts/orca-project.sh"
 P_TMP="$(mktemp -d)"
@@ -3129,15 +3131,20 @@ wassert 'uninstall: removes the agents-style reader' \
   bash -c "test ! -e '$P_IH2/.local/bin/orca-project' && test ! -L '$P_IH2/.local/bin/orca-project'"
 
 # orca init, through the launcher's shim PATH and stub gh. Each case gets a
-# repo with one commit on main, an origin on GitHub and a pushurl to a local
-# bare repository.
+# repo with one commit on main, an origin on GitHub rewritten to a local bare
+# repository, and main pushed there (origin's default branch).
+# p_commit <dir> <message> — an empty commit as a fixed test identity
+p_commit() {
+  git -C "$1" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m "$2"
+}
 # p_init_repo <dir>
 p_init_repo() {
   git init -q -b main "$1"
-  git -C "$1" -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m init
-  git init -q --bare "$1.git"
+  p_commit "$1" init
+  git init -q --bare -b main "$1.git"
   git -C "$1" remote add origin 'git@github.com:octocat/proj.git'
-  git -C "$1" config remote.origin.pushurl "$1.git"
+  git -C "$1" config "url.$1.git.insteadOf" 'git@github.com:octocat/proj.git'
+  git -C "$1" push -q origin main
 }
 # run_init <dir> <answers> — orca init with the answers on stdin, as the
 # user's own gh and git identity; gh calls land in <dir>.calls
@@ -3152,6 +3159,7 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   P_I1="$P_TMP/init-gh"
   p_init_repo "$P_I1"
   P_I1_MAIN="$(git -C "$P_I1" rev-parse main)"
+  P_I1_ORIGIN_MAIN="$(git -C "$P_I1.git" rev-parse main)"
   run_init "$P_I1" $'\n\n\n'
   wassert 'init: keeping every proposal exits 0' test "$ORCA_RC" -eq 0
   orca_said 'init: proposes the name from the remote' 'name [proj]: '
@@ -3170,9 +3178,9 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   wassert 'init: the branch is pushed to origin' \
     git -C "$P_I1.git" rev-parse -q --verify refs/heads/chore/orca-init
   wassert 'init: calls gh pr create for the origin repo and the branch' \
-    grep -qF 'pr create --repo octocat/proj --head chore/orca-init' "$P_I1.calls"
+    grep -qF 'pr create --repo octocat/proj --head chore/orca-init --base main' "$P_I1.calls"
   wassert 'init: never moves main' test "$(git -C "$P_I1" rev-parse main)" = "$P_I1_MAIN"
-  wassert 'init: never pushes main' bash -c "! git -C '$P_I1.git' rev-parse -q --verify refs/heads/main"
+  wassert "init: leaves origin's main as it was" test "$(git -C "$P_I1.git" rev-parse main)" = "$P_I1_ORIGIN_MAIN"
   wassert 'init: leaves main checked out' test "$(git -C "$P_I1" symbolic-ref --short HEAD)" = main
   wassert 'init: leaves the working tree clean, with no project file' \
     bash -c "test -z \"\$(git -C '$P_I1' status --porcelain)\" && test ! -e '$P_I1/.orca'"
@@ -3226,6 +3234,74 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   run_init "$P_I1" $'\n\n\n'
   wassert 'init: an existing branch exits 1' test "$ORCA_RC" -eq 1
   orca_said 'init: an existing branch is named' 'branch chore/orca-init already exists'
+
+  # run from a feature branch with an unpushed commit: the init branch starts
+  # at origin's main, so that commit is neither pushed nor in the PR
+  P_I6="$P_TMP/init-feature"
+  p_init_repo "$P_I6"
+  git -C "$P_I6" checkout -q -b feat/wip
+  p_commit "$P_I6" 'WIP commit'
+  P_I6_WIP="$(git -C "$P_I6" rev-parse HEAD)"
+  run_init "$P_I6" $'\n\n\n'
+  wassert 'init: from a feature branch exits 0' test "$ORCA_RC" -eq 0
+  wassert "init: from a feature branch, the init branch is one commit ahead of origin's main" \
+    test "$(git -C "$P_I6" rev-list --count refs/remotes/origin/main..chore/orca-init)" = 1
+  wassert "init: the feature branch's unpushed commit is not on the init branch" \
+    bash -c "! git -C '$P_I6' merge-base --is-ancestor '$P_I6_WIP' chore/orca-init"
+  wassert "init: the feature branch's unpushed commit is not pushed" \
+    bash -c "! git -C '$P_I6.git' cat-file -e '$P_I6_WIP' 2>/dev/null"
+  wassert 'init: from a feature branch, the PR targets the default branch' \
+    grep -qF -- '--base main' "$P_I6.calls"
+  wassert 'init: leaves the feature branch checked out where it was' \
+    test "$(git -C "$P_I6" symbolic-ref --short HEAD):$(git -C "$P_I6" rev-parse HEAD)" = "feat/wip:$P_I6_WIP"
+
+  # the branch exists on origin but not locally: refused before any question,
+  # not at the push
+  P_I7="$P_TMP/init-remote-branch"
+  p_init_repo "$P_I7"
+  git -C "$P_I7" push -q origin main:refs/heads/chore/orca-init
+  run_init "$P_I7" $'\n\n\n'
+  wassert 'init: a branch on origin exits 1' test "$ORCA_RC" -eq 1
+  orca_said 'init: a branch on origin is named' 'origin already has a branch chore/orca-init'
+  orca_not_said 'init: a branch on origin is refused before any question' 'name ['
+  wassert 'init: a branch on origin creates no local branch' \
+    bash -c "! git -C '$P_I7' rev-parse -q --verify refs/heads/chore/orca-init"
+  wassert 'init: a branch on origin opens no PR' bash -c "! grep -q 'pr create' '$P_I7.calls' 2>/dev/null"
+
+  # a stale checkout: origin's main already holds the file
+  P_I8="$P_TMP/init-stale"
+  p_init_repo "$P_I8"
+  git -C "$P_I8" checkout -q -b elsewhere
+  p_file "$P_I8" '{"version":1,"name":"Theirs","tracker":"github","github":{"repo":"octocat/proj"}}'
+  git -C "$P_I8" add .orca/project.json
+  p_commit "$P_I8" 'add project data'
+  git -C "$P_I8" push -q origin elsewhere:main
+  git -C "$P_I8" checkout -q main
+  git -C "$P_I8" branch -q -D elsewhere
+  run_init "$P_I8" $'\n\n\n'
+  wassert "init: a file on origin's main exits 1" test "$ORCA_RC" -eq 1
+  orca_said "init: a file on origin's main is named" 'origin/main already has .orca/project.json'
+  orca_not_said "init: a file on origin's main is refused before any question" 'name ['
+
+  # orca --check: an install without the reader fails the install check
+  P_CH_NOREADER="$P_TMP/ch-noreader"
+  ORCA_STYLE=claude HOME="$L_HOME" CLAUDE_HOME="$P_CH_NOREADER" ORCA_BIN="$L_OBIN" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+  rm -f "$P_CH_NOREADER/scripts/orca-project.sh"
+  ORCA_ENV=(CLAUDE_HOME="$P_CH_NOREADER")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a claude install without the reader fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: the missing claude-style reader is named' \
+    "fail: install: $P_CH_NOREADER/scripts/orca-project.sh is missing"
+  P_HOME_NOREADER="$P_TMP/home-agents-noreader"
+  P_OBIN_NOREADER="$P_TMP/obin-agents-noreader"
+  mkdir -p "$P_HOME_NOREADER"
+  ORCA_STYLE=agents HOME="$P_HOME_NOREADER" ORCA_BIN="$P_OBIN_NOREADER" sh "$INSTALL_SH" </dev/null >/dev/null 2>&1
+  rm -f "$P_OBIN_NOREADER/orca-project"
+  ORCA_ENV=(HOME="$P_HOME_NOREADER" XDG_CONFIG_HOME="$P_HOME_NOREADER/.config" ORCA_BIN="$P_OBIN_NOREADER" ORCA_TOKEN_FILE="$L_TOKEN")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: an agents install without the reader fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: the missing agents-style reader is named' \
+    "fail: install: $P_OBIN_NOREADER/orca-project is missing"
 else
   printf 'skip: orca init cases (could not build a PATH shim)\n'
 fi
