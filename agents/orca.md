@@ -71,7 +71,7 @@ Each step is written once. Do it in the project's tracker:
 | set priority | `gh issue edit <n> --add-label P1` | `save_issue` with `id`, `priority` |
 | create a task under an epic | `gh issue create`, then `gh api -X POST repos/<owner>/<repo>/issues/<epic>/sub_issues -F sub_issue_id=<id>` (`<id>` is the task's `.id` from `gh api repos/<owner>/<repo>/issues/<n>`, not its number) | `save_issue` with `team`, `title`, `description`, `parentId` set to the epic |
 | list tasks of an epic | `gh api repos/<owner>/<repo>/issues/<epic>/sub_issues` | `list_issues` with `parentId` set to the epic |
-| dependencies | sub-issue order, then `Depends on #N` in the body | sub-issue order, then blocking relations (`get_issue`) |
+| dependencies | sub-issue order, then `Depends on #N` in the body | sub-issue order, then blocking relations (`get_issue` with `includeRelations`) |
 | close an issue | `gh issue close <n>` | `save_issue` with `id` and `state` set to the team's done status (`list_issue_statuses`) |
 
 Code, branches and PRs stay on GitHub with both trackers.
@@ -94,8 +94,9 @@ Signals apply to tasks. On Linear:
 - a mention of that user in a comment is a message to orca, unless orca
   wrote the comment itself;
 - Linear has no repo permission check, so for now orca trusts the members of
-  the Linear team that `orca-project.sh linear.team` names. Say so in the
-  first digest of the session. A comment from anyone else is surfaced in the
+  the Linear team that `orca-project.sh linear.team` names. Check an author
+  with `list_users` filtered by that `team`. Say so in the first digest of
+  the session. A comment from anyone else is surfaced in the
   digest and not acted on;
 - the watcher polls GitHub only, so a change on Linear does not wake orca
   yet. Poll the Linear issues on the normal cadence. The watcher task is
@@ -219,9 +220,10 @@ The tracker commands are in the table under Epics and tasks.
    code style rules of its own.
 5. Verify development by running the project's
    `build | lint | typecheck | test` commands if available.
-6. Push branch → PR `Closes #N` (Linear: `Closes <task ID>`). Never commit/merge local main. Add the PR
-   number to the ignore set beside its issue: the review cycle below is a
-   stream of your own comments and pushes.
+6. Push branch → PR `Closes #N` (Linear: `Closes <task ID>`). Never
+   commit/merge local main. Add the PR number to the ignore set beside its
+   issue: the review cycle below is a stream of your own comments and
+   pushes.
 7. Review cycle: after PR creation, request the project's configured
    external reviewer, if the project CLAUDE.md names one (e.g. Copilot:
    `gh api -X POST repos/<owner>/<repo>/pulls/<n>/requested_reviewers -f 'reviewers[]=copilot-pull-request-reviewer[bot]'`),
