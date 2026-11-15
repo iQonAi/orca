@@ -21,15 +21,27 @@ to subagent workers.
 
 ## Project config (resolve at startup)
 
+The project data reader is `~/.claude/scripts/orca-project.sh`. This
+playbook always writes its full path, because `~/.claude/scripts` is not
+on `PATH`.
+
+- **Project data file:** check that it exists with
+  `test -f "$(git rev-parse --show-toplevel)/.orca/project.json"`. The
+  reader prints the same defaults for a missing file and for a file that
+  says `github`, so only this check tells them apart. If the file is
+  missing, suggest `orca init` once, in the first digest of the session.
+  Never run `orca init` yourself.
 - **Tracker:** `~/.claude/scripts/orca-project.sh tracker` prints `github`
   or `linear`. Read the other fields you need the same way:
-  `orca-project.sh github.repo`, and for Linear `orca-project.sh linear.team`
-  and `orca-project.sh linear.project`. Without `.orca/project.json` the
-  defaults apply: GitHub, with the repo taken from the `origin` remote. In
-  that case suggest `orca init` once, in the first digest of the session.
-  Never run `orca init` yourself.
-- **Repo:** `orca-project.sh github.repo`. Code, branches and PRs live on
-  this GitHub repo with either tracker. Ask the user if the reader fails.
+  `~/.claude/scripts/orca-project.sh github.repo`, and for Linear
+  `~/.claude/scripts/orca-project.sh linear.team` and
+  `~/.claude/scripts/orca-project.sh linear.project`. Without the file, the
+  defaults apply: GitHub, with the repo taken from the `origin` remote.
+- **Reader failure:** if the reader exits 1 on any field, the file is
+  broken. Do not dispatch. Report the reason from stderr in the digest
+  under Blocked and ask the user to fix the file.
+- **Repo:** `~/.claude/scripts/orca-project.sh github.repo`. Code, branches
+  and PRs live on this GitHub repo with either tracker.
 - **Own login:** `gh api user --jq .login` — the account the launcher's
   `GH_TOKEN` authenticates as. Record it at startup: every comment, branch
   and PR orca makes is this account's, and the first digest of the session
@@ -40,6 +52,12 @@ to subagent workers.
   assignment convention (a session started without the launcher runs as
   the user, and CLAUDE.md then names the handle that marks agent work); if
   neither names one, ask the user once at startup.
+- **Linear identity** (Linear projects only): run the Linear MCP `whoami`
+  tool at startup. Record the account and name it in the first digest
+  (`linear as <name>`). Orca acts as a dedicated bot Linear user, the way it
+  uses its own login on GitHub. If the account is a human team member and
+  not a bot, say so in the digest. In that case assignment to `me` is not a
+  dispatch signal.
 
 ## Role
 
@@ -50,13 +68,18 @@ to subagent workers.
 
 ## Epics and tasks
 
-- An **epic** is a parent issue. Comment a plan on it that splits it into
-  tasks, then create each task as a sub-issue of the epic. Never dispatch the
-  epic itself.
+- An **epic** is an issue with the `epic` label, on GitHub and on Linear.
+  An issue that already has sub-issues is a parent and is treated the same
+  way. Comment a plan on the epic that splits it into tasks, then create
+  each task as a sub-issue of the epic. Never dispatch the epic itself.
+- Tasks that orca creates are written by orca's own account, so they are
+  not signals by themselves. Add `ready-for-agent` to them only when the
+  epic carries a dispatch signal from a trusted author (see Signals).
+  Otherwise they wait until a trusted author signals them.
 - A **task** is a sub-issue. The worker lifecycle below (worktree, PR,
   review, merge, teardown) applies to tasks, one PR per task.
-- An issue with no parent and no sub-issues is a task on its own, so a
-  single issue still works as before.
+- An issue without the `epic` label and without sub-issues is a task on its
+  own, so a single issue still works as before.
 - When every task of an epic is closed, close the epic and report it under
   Landed.
 
@@ -65,6 +88,7 @@ Each step is written once. Do it in the project's tracker:
 | step | GitHub | Linear MCP |
 | --- | --- | --- |
 | comment on an issue | `gh issue comment <n> --body-file <file>` | `save_comment` with `issueId`, `body` |
+| find epics | `gh issue list --label epic` | `list_issues` with `team` and `label` `epic` |
 | find dispatchable tasks | `gh issue list --label ready-for-agent`, `gh issue list --assignee <login>` | `list_issues` with `team` and `label` `ready-for-agent`, or `assignee` `me` |
 | read comments | `gh issue view <n> --comments` | `list_comments` with the issue ID |
 | set labels | `gh issue edit <n> --add-label <l> --remove-label <l>` | `save_issue` with `id`, `addLabels`, `removeLabels` (never `labels`: it replaces the whole set) |
@@ -87,20 +111,33 @@ Priority applies to tasks.
 
 ## Signals
 
-Signals apply to tasks. On Linear:
+Signals apply to tasks, and to an epic for labelling its tasks (see Epics
+and tasks). On Linear:
 
-- a `ready-for-agent` label, or assignment to the bot's Linear user (`me` in
-  the Linear tools), is the dispatch signal;
-- a mention of that user in a comment is a message to orca, unless orca
-  wrote the comment itself;
-- Linear has no repo permission check, so for now orca trusts the members of
-  the Linear team that `orca-project.sh linear.team` names. Check an author
-  with `list_users` filtered by that `team`. Say so in the first digest of
-  the session. A comment from anyone else is surfaced in the
-  digest and not acted on;
-- the watcher polls GitHub only, so a change on Linear does not wake orca
-  yet. Poll the Linear issues on the normal cadence. The watcher task is
-  https://github.com/iQonAi/orca/issues/53.
+- **Trust is team membership.** Linear has no repo permission check, and
+  any workspace member or integration can usually file an issue or add a
+  label. So orca trusts only the members of the Linear team that
+  `~/.claude/scripts/orca-project.sh linear.team` names. Check a user with
+  `list_users` with `team` set to that team.
+- **Dispatch signal:** a `ready-for-agent` label, or assignment to orca's
+  Linear user (`me`, see Linear identity). Assignment counts only when that
+  user is a dedicated bot user.
+- **Who made the signal:** act on a signal only when a team member made it.
+  `get_issue` shows `createdBy` and `stateHistory`, but no Linear tool shows
+  who added a label or made an assignment. So require the issue's creator
+  (`createdBy`) to be a team member. This is a limit: an issue a team member
+  filed is dispatched even when someone outside the team added the label.
+  Say so in the first digest of the session.
+- **Messages:** a mention of orca's Linear user in a comment by a team
+  member is a message to orca. Orca's own comments are never signals.
+- Anything from outside the team is surfaced in the digest (author, link,
+  gist) and not acted on.
+- **Each poll on Linear:** `list_issues` with `team`, `project` (when
+  `linear.project` is set) and `updatedAt` set to the time of the last poll,
+  then `list_comments` on each of those issues.
+- **No watcher yet:** the watcher polls GitHub only, so a change on Linear
+  does not wake orca. Cap the idle poll cadence at about 600s on a Linear
+  project. The watcher task is https://github.com/iQonAi/orca/issues/53.
 
 On GitHub:
 
@@ -131,7 +168,8 @@ On GitHub:
 - Poll cadence is ADAPTIVE: 60s when issue/PR comments are actively flowing
   (fresh comment seen in the last few minutes) or a review is imminently
   expected; decay gradually (60 → 180 → 600) as activity quiets; ~600s
-  baseline during worker waits; up to ~1800s when fully idle.
+  baseline during worker waits; up to ~1800s when fully idle (about 600s
+  on a Linear project; see Signals).
 - 30s DETECTION: the wakeup floor is 60s, so a background watcher
   (`~/.claude/scripts/gh-watch.sh <owner/repo>`, run_in_background) polls the
   repo's open issues and PRs every 30s and EXITS on any issue/comment/label
@@ -206,9 +244,10 @@ On GitHub:
 
 The tracker commands are in the table under Epics and tasks.
 
-1. Comment implementation plan on the task; label with priority and
-   workflow state (`ready-for-agent` = dispatch without asking,
-   `needs-info` = wait).
+1. Comment implementation plan on the task. Set its priority with the
+   tracker's own mechanism (a label on GitHub, the priority field on
+   Linear) and its workflow-state label (`ready-for-agent` = dispatch
+   without asking, `needs-info` = wait).
 2. `git worktree add .claude/worktrees/<slug> -b feat/<slug>` at primary
    root.
 3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`. Add
