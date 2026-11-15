@@ -4,11 +4,14 @@
 # identity and execs `claude --agent orca` (#43).
 #
 # Usage: orca [--check] [--repo owner/repo] [claude args...]
+#        orca init
 #   --check            run the checks, print the results, exit 0/1; launch
 #                      nothing, write nothing
 #   --repo owner/repo  check this repository instead of the one detected from
 #                      the origin remote of the current directory
 #   --help             usage
+#   init               write .orca/project.json for this checkout and open a
+#                      PR with it; see orca_init below
 #   Anything else is passed through to claude.
 #
 # Orca acts as a GitHub account of its own. Its token lives in
@@ -27,11 +30,12 @@
 #                user succeeds with it - `running as <login>`
 #   3. repo      owner/repo from the checkout's origin remote (or --repo); the
 #                bot's permission on it is write, maintain or admin
-#   4. install   the playbook, the SessionStart hook and the watcher resolve
-#                to real files - a dangling symlink is named - and, claude
-#                style, the hook is wired in settings.json by the installer's
-#                own identity rule (an entry whose command is the hook path,
-#                in the ~ or the absolute spelling)
+#   4. install   the playbook, the SessionStart hook, the watcher and the
+#                project data reader resolve to real files - a dangling
+#                symlink is named - and, claude style, the hook is wired in
+#                settings.json by the installer's own identity rule (an
+#                entry whose command is the hook path, in the ~ or the
+#                absolute spelling)
 #   5. instance  no live orca holds this repository's session record
 #
 # Session record: <config>/orca/sessions/<repo-slug> holds the pid of the
@@ -50,10 +54,13 @@ CH="${CLAUDE_HOME:-$HOME/.claude}"
 # as in install.sh: `/x/` names the same home as `/x`
 CH="${CH%"${CH##*[!/]}"}"
 BIN="${ORCA_BIN:-$HOME/.local/bin}"
+INIT_BRANCH=chore/orca-init
+PROJECT_FILE=.orca/project.json
 
 usage() {
   cat <<EOF
 usage: orca [--check] [--repo owner/repo] [claude args...]
+       orca init
 
 Runs the preflight checks, exports the bot's GitHub identity and execs
 claude --agent orca. Every check runs before the launch is decided.
@@ -65,6 +72,14 @@ claude --agent orca. Every check runs before the launch is decided.
   --help             this text
 
 Anything else is passed through to claude.
+
+orca init asks for the project's values (name, tracker, GitHub repo, and the
+Linear team and project for the linear tracker), proposing defaults from the
+origin remote, then commits .orca/project.json on a new branch
+$INIT_BRANCH, made from origin's default branch in a worktree of its own,
+pushes it to origin and opens a PR against the default branch with gh. It
+never commits to the checked-out branch, and it refuses to run when the file
+or the branch already exists.
 
 Files
   $TOKEN_FILE
@@ -80,6 +95,164 @@ Environment
                                  (~/.claude and ~/.local/bin)
 EOF
 }
+
+# --- init --------------------------------------------------------------------
+# orca init: writes the project data file and opens a PR with it. Every
+# refusal comes before the first question, and every answer is validated by
+# the reader before the user's repository is touched:
+#   - the file must not exist in the working tree, in HEAD or on origin's
+#     default branch, and $INIT_BRANCH must exist neither locally nor on
+#     origin, so an earlier run or a hand-written file is never replaced and
+#     a second run never fails late at the push;
+#   - the proposals are the reader's own no-file defaults, so init and the
+#     consumers agree on what "no file" means;
+#   - the candidate is written to a scratch repository and read back field by
+#     field by the reader; a value the reader rejects ends the run with its
+#     reason and nothing written;
+#   - the commit is made in a worktree of its own on $INIT_BRANCH, branched
+#     from origin's default branch as just fetched, never from HEAD: a run
+#     from a feature branch, or from a local main ahead of origin, must not
+#     push those commits or put them in the PR. The checked-out branch and
+#     the working tree never change. The branch is pushed to origin and the
+#     PR opened against the default branch with the caller's own git and gh
+#     credentials: init is a setup step the user runs, and it reads no bot
+#     token.
+# Answers come from stdin, one line each; an empty line keeps the proposal.
+# End of input before the last answer stops the run with nothing written.
+init_die() {
+  echo "orca init: $*" >&2
+  exit 1
+}
+# $1 the reader's name for the field, $2 the proposal; the answer in $ans
+ask() {
+  if [ -n "$2" ]; then
+    printf '%s [%s]: ' "$1" "$2"
+  else
+    printf '%s: ' "$1"
+  fi
+  ans=
+  if ! read -r ans && [ -z "$ans" ]; then
+    echo
+    init_die "no answer for $1 (end of input); nothing written"
+  fi
+  [ -n "$ans" ] || ans=$2
+}
+orca_init() {
+  [ $# -eq 0 ] || init_die "takes no arguments (got: $*)"
+  for t in git gh jq; do
+    command -v "$t" >/dev/null 2>&1 || init_die "$t not on PATH"
+  done
+  # The reader as installed (claude style, then agents style), else the one
+  # beside this launcher in a checkout.
+  reader=
+  for r in "$CH/scripts/orca-project.sh" "$BIN/orca-project" "${0%/*}/../scripts/orca-project.sh"; do
+    if [ -f "$r" ]; then
+      reader=$r
+      break
+    fi
+  done
+  [ -n "$reader" ] || init_die "scripts/orca-project.sh not found under $CH/scripts or $BIN; run install.sh"
+  root=$(git rev-parse --show-toplevel 2>/dev/null) || root=
+  [ -n "$root" ] || init_die "not inside a git repository"
+  if [ -e "$root/$PROJECT_FILE" ] || [ -L "$root/$PROJECT_FILE" ] ||
+    git -C "$root" cat-file -e "HEAD:$PROJECT_FILE" 2>/dev/null; then
+    init_die "$root/$PROJECT_FILE already exists; edit it on a branch instead"
+  fi
+  if git -C "$root" rev-parse -q --verify "refs/heads/$INIT_BRANCH" >/dev/null; then
+    init_die "branch $INIT_BRANCH already exists; delete it or finish its PR first"
+  fi
+  origin_repo=$(cd "$root" && sh "$reader" github.repo) ||
+    init_die "no owner/repo from the origin remote; add one first"
+  # Asked of origin itself, not of a remote-tracking ref that may be stale or
+  # absent (a fetch does not set refs/remotes/origin/HEAD).
+  sym=$(git -C "$root" ls-remote --symref origin HEAD) ||
+    init_die "could not reach origin to find its default branch"
+  case "$sym" in
+    "ref: refs/heads/"*) ;;
+    *) init_die "origin names no default branch" ;;
+  esac
+  default=${sym#ref: refs/heads/}
+  default=${default%%[[:space:]]*}
+  git -C "$root" ls-remote --exit-code --heads origin "refs/heads/$INIT_BRANCH" >/dev/null
+  case $? in
+    0) init_die "origin already has a branch $INIT_BRANCH; finish or close its PR and delete that branch first" ;;
+    2) ;;
+    *) init_die "could not list the branches on origin" ;;
+  esac
+  git -C "$root" fetch -q origin "+refs/heads/$default:refs/remotes/origin/$default" ||
+    init_die "could not fetch $default from origin"
+  base=$(git -C "$root" rev-parse -q --verify "refs/remotes/origin/$default^{commit}") ||
+    init_die "origin/$default has no commit to branch from"
+  if git -C "$root" cat-file -e "$base:$PROJECT_FILE" 2>/dev/null; then
+    init_die "origin/$default already has $PROJECT_FILE; pull it instead"
+  fi
+
+  echo "Project data for $root ($PROJECT_FILE). Press enter to keep a proposal."
+  ask name "${origin_repo##*/}"
+  name=$ans
+  ask tracker "$(cd "$root" && sh "$reader" tracker)"
+  tracker=$ans
+  ask github.repo "$origin_repo"
+  repo=$ans
+  team=
+  project=
+  if [ "$tracker" = linear ]; then
+    ask linear.team ""
+    team=$ans
+    ask 'linear.project (optional, enter for none)' ""
+    project=$ans
+  fi
+  json=$(jq -n --arg name "$name" --arg tracker "$tracker" --arg repo "$repo" \
+    --arg team "$team" --arg project "$project" '
+    {version: 1, name: $name, tracker: $tracker, github: {repo: $repo}}
+    + if $tracker == "linear" then
+        {linear: ({team: $team} + if $project == "" then {} else {project: $project} end)}
+      else {} end') || init_die "could not build the JSON"
+
+  tmp=$(mktemp -d) || init_die "could not make a temp directory"
+  check="$tmp/check"
+  if ! { mkdir -p "$check/.orca" && git init -q "$check" &&
+    printf '%s\n' "$json" >"$check/$PROJECT_FILE"; }; then
+    init_die "could not write the candidate under $tmp"
+  fi
+  fields="tracker name github.repo"
+  [ "$tracker" != linear ] || fields="$fields linear.team linear.project"
+  for f in $fields; do
+    if ! err=$(cd "$check" && sh "$reader" "$f" 2>&1 >/dev/null); then
+      rm -rf "$tmp"
+      init_die "${err#orca-project.sh: "$check/$PROJECT_FILE": }; nothing written"
+    fi
+  done
+
+  wt="$tmp/worktree"
+  git -C "$root" worktree add -q -b "$INIT_BRANCH" "$wt" "$base" ||
+    init_die "could not add a worktree on $INIT_BRANCH"
+  left="the worktree $wt and the branch $INIT_BRANCH are left in place; clean up with: git worktree remove --force $wt && git branch -D $INIT_BRANCH"
+  if ! { mkdir -p "$wt/.orca" && cp "$check/$PROJECT_FILE" "$wt/$PROJECT_FILE"; }; then
+    init_die "could not write $PROJECT_FILE in $wt; $left"
+  fi
+  if ! { git -C "$wt" add -- "$PROJECT_FILE" &&
+    git -C "$wt" commit -q -m "chore: add the orca project data file" -- "$PROJECT_FILE"; }; then
+    init_die "could not commit $PROJECT_FILE; $left"
+  fi
+  git -C "$wt" push -q origin "$INIT_BRANCH" ||
+    init_die "could not push $INIT_BRANCH to origin; $left"
+  url=$(cd "$wt" && gh pr create --repo "$origin_repo" --head "$INIT_BRANCH" --base "$default" \
+    --title "chore: add the orca project data file" \
+    --body "Adds \`$PROJECT_FILE\`, written by \`orca init\`. It holds no secrets.") ||
+    init_die "could not open the PR; $INIT_BRANCH is pushed. $left"
+  echo "wrote $PROJECT_FILE on $INIT_BRANCH and opened $url"
+  if git -C "$root" worktree remove "$wt"; then
+    rm -rf "$tmp"
+  else
+    echo "note: could not remove the worktree $wt; remove it with: git worktree remove --force $wt" >&2
+  fi
+}
+if [ "${1:-}" = init ]; then
+  shift
+  orca_init "$@"
+  exit 0
+fi
 
 CHECK=0
 REPO=
@@ -261,11 +434,11 @@ check_file() {
 case "$style" in
   claude)
     files_ok=1
-    for f in "$CH/agents/orca.md" "$CH/hooks/orca-start-watcher.sh" "$CH/scripts/gh-watch.sh"; do
+    for f in "$CH/agents/orca.md" "$CH/hooks/orca-start-watcher.sh" "$CH/scripts/gh-watch.sh" "$CH/scripts/orca-project.sh"; do
       check_file "$f" || files_ok=0
     done
     if [ "$files_ok" = 1 ]; then
-      ok "install: claude style; playbook, hook and watcher in place under $CH"
+      ok "install: claude style; playbook, hook, watcher and project reader in place under $CH"
     fi
     # Wired means an entry whose hooks[].command is the hook path, in either
     # spelling the installer knows (install.sh wire_claude_hook): the ~ form
@@ -294,11 +467,11 @@ case "$style" in
     ;;
   agents)
     files_ok=1
-    for f in "$BIN/gh-watch" "$HOME/.config/orca/AGENTS.md"; do
+    for f in "$BIN/gh-watch" "$BIN/orca-project" "$HOME/.config/orca/AGENTS.md"; do
       check_file "$f" || files_ok=0
     done
     if [ "$files_ok" = 1 ]; then
-      ok "install: agents style; watcher and playbook in place"
+      ok "install: agents style; watcher, project reader and playbook in place"
     fi
     ;;
   *)

@@ -249,6 +249,7 @@ install_claude() {
   install_one "$ORCA_REPO/agents/orca.md" "$CH/agents/orca.md"
   install_one "$ORCA_REPO/hooks/orca-start-watcher.sh" "$CH/hooks/orca-start-watcher.sh"
   install_one "$ORCA_REPO/scripts/gh-watch.sh" "$CH/scripts/gh-watch.sh"
+  install_one "$ORCA_REPO/scripts/orca-project.sh" "$CH/scripts/orca-project.sh"
   wire_claude_hook "$CH/settings.json"
   install_launcher
 }
@@ -305,6 +306,7 @@ install_agents() {
   BIN="${ORCA_BIN:-$HOME/.local/bin}"
   mkdir -p "$BIN" "$HOME/.config/orca"
   install_one "$ORCA_REPO/scripts/gh-watch.sh" "$BIN/gh-watch"
+  install_one "$ORCA_REPO/scripts/orca-project.sh" "$BIN/orca-project"
   install_one "$ORCA_REPO/agents/orca.md" "$HOME/.config/orca/AGENTS.md"
   install_launcher
   echo "  note: point your agent at ~/.config/orca/AGENTS.md (e.g. append it to ~/.codex/AGENTS.md)."
@@ -464,12 +466,14 @@ uninstall_claude() {
   remove_installed "$CH/agents/orca.md" agents/orca.md
   remove_installed "$CH/hooks/orca-start-watcher.sh" hooks/orca-start-watcher.sh
   remove_installed "$CH/scripts/gh-watch.sh" scripts/gh-watch.sh
+  remove_installed "$CH/scripts/orca-project.sh" scripts/orca-project.sh
   unwire_claude_hook "$CH/settings.json"
 }
 
 uninstall_agents() {
   BIN="${ORCA_BIN:-$HOME/.local/bin}"
   remove_installed "$BIN/gh-watch" scripts/gh-watch.sh
+  remove_installed "$BIN/orca-project" scripts/orca-project.sh
   remove_installed "$HOME/.config/orca/AGENTS.md" agents/orca.md
   # Only this directory is orca's own; ~/.claude/* and ~/.local/bin belong to
   # the user. rmdir (never rm -r) so a non-empty one is left standing - one

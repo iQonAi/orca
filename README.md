@@ -29,7 +29,8 @@ the rest and reports a digest each cycle.
 | `agents/orca.md`              | The orchestrator playbook — a Claude Code agent definition.                 |
 | `scripts/gh-watch.sh`         | Polls a repo's open issues and PRs every 30s (`gh issue list` plus `gh pr list`); exits on any change that a second fetch confirms. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection, ~35s on the poll that sees the change. Enforces one watcher per repo via a pidfile, with `--status`, `--takeover` and `--ignore` modes; `--ignore` records the issue/PR numbers orca currently owns, so its own workers' pushes and comments do not wake it. |
 | `hooks/orca-start-watcher.sh` | SessionStart hook. When the session is orca, it injects a directive telling orca to launch the watcher for the repo resolved from the git remote. No network calls; always exits 0. |
-| `bin/orca`                    | The launcher, and how a session is started. Runs the preflight checks — tools on `PATH`, the bot's token file and the login it authenticates, the bot's write access on the repository, the installed files and hook wiring, no second orca on the repository — then exports `GH_TOKEN` and the bot's git identity and execs `claude --agent orca`. `orca --check` runs the checks alone. |
+| `scripts/orca-project.sh`     | Reads one field of the project data file, `.orca/project.json`, and prints it. With no file it answers the defaults (GitHub tracker, repo from the git remote); a broken file is an error, never a default. See [Project data](#project-data). |
+| `bin/orca`                    | The launcher, and how a session is started. Runs the preflight checks — tools on `PATH`, the bot's token file and the login it authenticates, the bot's write access on the repository, the installed files and hook wiring, no second orca on the repository — then exports `GH_TOKEN` and the bot's git identity and execs `claude --agent orca`. `orca --check` runs the checks alone; `orca init` writes the project data file and opens a PR with it. |
 | `test/run.sh`                 | Hermetic test suite for the scripts, the installer and the launcher (stubbed `gh` and `claude`, temp HOMEs and state dirs). |
 
 ## Requirements
@@ -66,13 +67,14 @@ git clone https://github.com/iQonAi/orca.git && cd orca && ./install.sh
 
 Styles:
 
-- **claude** — symlinks the agent, hook, and watcher into
+- **claude** — symlinks the agent, hook, watcher, and project data reader into
   `~/.claude/{agents,hooks,scripts}` and wires the SessionStart hook into
   `~/.claude/settings.json` (needs `jq`; prints the snippet to add by hand
   if `jq` is missing).
 - **agents** — **experimental and untested**; for AGENTS.md-convention agents
   (Codex/Cursor/Gemini-class). It installs the watcher to
-  `~/.local/bin/gh-watch` and the playbook to `~/.config/orca/AGENTS.md`. The
+  `~/.local/bin/gh-watch`, the project data reader to
+  `~/.local/bin/orca-project`, and the playbook to `~/.config/orca/AGENTS.md`. The
   SessionStart hook is Claude-specific and is skipped; launch the watcher
   yourself per the playbook. The install itself works (the files land; no
   hook is wired), but orca has never been run under any of those harnesses.
@@ -99,7 +101,7 @@ Environment overrides:
 | `ORCA_REF`    | `v0.1.0`               | the release tag the piped install checks out, and moves an existing clone to on re-run; `ORCA_REF=main` for development |
 | `ORCA_MODE`   | `link`                 | `copy` to copy files instead of symlinking     |
 | `CLAUDE_HOME` | `~/.claude`            | claude-style destination                       |
-| `ORCA_BIN`    | `~/.local/bin`         | launcher destination (both styles) and agents-style watcher destination |
+| `ORCA_BIN`    | `~/.local/bin`         | launcher destination (both styles), and agents-style watcher and project data reader destination |
 | `ORCA_TOKEN_FILE` | `~/.config/orca/token` | (launcher) the bot's token file; `~/.config` follows `XDG_CONFIG_HOME` |
 | `ORCA_GIT_NAME` | the bot's login      | (launcher) git author and committer name orca commits with |
 | `ORCA_GIT_EMAIL` | `<id>+<login>@users.noreply.github.com` | (launcher) git author and committer email orca commits with |
@@ -194,8 +196,9 @@ teardown that needs the network is broken by design.
 
 Removes:
 
-- `~/.claude/{agents/orca.md,hooks/orca-start-watcher.sh,scripts/gh-watch.sh}`
-- `~/.local/bin/gh-watch` and `~/.config/orca/AGENTS.md` (plus
+- `~/.claude/{agents/orca.md,hooks/orca-start-watcher.sh,scripts/gh-watch.sh,scripts/orca-project.sh}`
+- `~/.local/bin/gh-watch`, `~/.local/bin/orca-project` and
+  `~/.config/orca/AGENTS.md` (plus
   `~/.config/orca` itself, if empty)
 - `~/.local/bin/orca`, the launcher (both styles)
 - the `SessionStart` entry it wired into `~/.claude/settings.json`
@@ -286,7 +289,8 @@ fails, naming every failure in one run:
 3. the repository, detected from the checkout's `origin` remote
    (`--repo owner/repo` overrides), and the bot's permission on it — write,
    maintain or admin;
-4. the installed files resolve to real files (a dangling symlink is named
+4. the installed files — the playbook, the hook, the watcher and the
+   project data reader — resolve to real files (a dangling symlink is named
    with its target) and, claude style, the `SessionStart` hook is wired in
    `settings.json`;
 5. no other orca holds this repository
@@ -313,6 +317,59 @@ signals, and it acts on an instruction only when its author has write access
 or better on the repository; anything else is surfaced in the digest. A
 project `CLAUDE.md` may still name the handle for the assignment convention;
 that value is the fallback for a session started without the launcher.
+
+### Project data
+
+`.orca/project.json`, at the root of the project's repository, tells orca
+where the project's work is tracked. Commit it with the project. It holds
+names only, never a token or any other secret:
+
+```json
+{ "version": 1, "name": "Devbox", "tracker": "linear",
+  "github": { "repo": "iQonAi/devbox-control-plane" },
+  "linear": { "team": "IQONAI", "project": "Devbox" } }
+```
+
+| Field            | Required                        | Value |
+| ---------------- | ------------------------------- | ----- |
+| `version`        | yes                             | `1` |
+| `name`           | yes                             | the project's display name |
+| `tracker`        | yes                             | `github` or `linear` |
+| `github.repo`    | yes, with either tracker        | `owner/repo`; code and PRs live on GitHub either way |
+| `linear.team`    | when `tracker` is `linear`      | the Linear team |
+| `linear.project` | no                              | the Linear project |
+
+Without the file, orca uses GitHub issues: `tracker` is `github`,
+`github.repo` comes from the `origin` remote, and `name` is the repository
+part of it. The `linear` fields are not set.
+
+`scripts/orca-project.sh <field>` reads one field and prints it, for
+example `orca-project.sh tracker` or `orca-project.sh linear.team`. It finds
+the file at the git root of the current directory and checks the whole file
+on every read. A malformed file, an unknown tracker, or a missing required
+field exits 1 with the reason on stderr; a broken file is never read as a
+missing one. An absent `linear.project` prints an empty line.
+
+To write the file, run this from the project:
+
+```sh
+orca init
+```
+
+It first fetches the default branch from `origin`. It refuses to run when
+`.orca/project.json` already exists in your working tree, in `HEAD` or on
+`origin`'s default branch, or when the branch `chore/orca-init` exists
+locally or on `origin`. All of these checks run before the first question.
+It proposes each value from the `origin` remote; press enter to keep a
+proposal or type a new value. The reader checks the answers before anything
+is written. Then `orca init` commits the file on the new branch
+`chore/orca-init`, branched from `origin`'s default branch in a worktree of
+its own, pushes the branch to `origin`, and opens a PR against the default
+branch with `gh pr create`. Commits on the branch you have checked out are
+never pushed or put in the PR, even when you run it from a feature branch.
+That branch and your working tree do not change, so the file reaches the
+default branch only through the PR. The push and the PR use your own `git`
+and `gh` credentials, not the bot's token.
 
 ### gh-watch.sh exit codes
 
