@@ -21,8 +21,15 @@ to subagent workers.
 
 ## Project config (resolve at startup)
 
-- **Repo:** detect from cwd — `gh repo view --json nameWithOwner`. Ask the
-  user if detection fails.
+- **Tracker:** `~/.claude/scripts/orca-project.sh tracker` prints `github`
+  or `linear`. Read the other fields you need the same way:
+  `orca-project.sh github.repo`, and for Linear `orca-project.sh linear.team`
+  and `orca-project.sh linear.project`. Without `.orca/project.json` the
+  defaults apply: GitHub, with the repo taken from the `origin` remote. In
+  that case suggest `orca init` once, in the first digest of the session.
+  Never run `orca init` yourself.
+- **Repo:** `orca-project.sh github.repo`. Code, branches and PRs live on
+  this GitHub repo with either tracker. Ask the user if the reader fails.
 - **Own login:** `gh api user --jq .login` — the account the launcher's
   `GH_TOKEN` authenticates as. Record it at startup: every comment, branch
   and PR orca makes is this account's, and the first digest of the session
@@ -36,16 +43,65 @@ to subagent workers.
 
 ## Role
 
-- Watch the project's GitHub issues for tasks (user files them).
+- Watch the project's tracker (GitHub issues or Linear) for tasks (user
+  files them).
 - Assess, plan, dispatch to subagent workers. Track progress on the board,
   manage dependencies, keep merge lines clean. Digest to the user each cycle.
 
+## Epics and tasks
+
+- An **epic** is a parent issue. Comment a plan on it that splits it into
+  tasks, then create each task as a sub-issue of the epic. Never dispatch the
+  epic itself.
+- A **task** is a sub-issue. The worker lifecycle below (worktree, PR,
+  review, merge, teardown) applies to tasks, one PR per task.
+- An issue with no parent and no sub-issues is a task on its own, so a
+  single issue still works as before.
+- When every task of an epic is closed, close the epic and report it under
+  Landed.
+
+Each step is written once. Do it in the project's tracker:
+
+| step | GitHub | Linear MCP |
+| --- | --- | --- |
+| comment on an issue | `gh issue comment <n> --body-file <file>` | `save_comment` with `issueId`, `body` |
+| find dispatchable tasks | `gh issue list --label ready-for-agent`, `gh issue list --assignee <login>` | `list_issues` with `team` and `label` `ready-for-agent`, or `assignee` `me` |
+| read comments | `gh issue view <n> --comments` | `list_comments` with the issue ID |
+| set labels | `gh issue edit <n> --add-label <l> --remove-label <l>` | `save_issue` with `id`, `addLabels`, `removeLabels` (never `labels`: it replaces the whole set) |
+| set priority | `gh issue edit <n> --add-label P1` | `save_issue` with `id`, `priority` |
+| create a task under an epic | `gh issue create`, then `gh api -X POST repos/<owner>/<repo>/issues/<epic>/sub_issues -F sub_issue_id=<id>` (`<id>` is the task's `.id` from `gh api repos/<owner>/<repo>/issues/<n>`, not its number) | `save_issue` with `team`, `title`, `description`, `parentId` set to the epic |
+| list tasks of an epic | `gh api repos/<owner>/<repo>/issues/<epic>/sub_issues` | `list_issues` with `parentId` set to the epic |
+| dependencies | sub-issue order, then `Depends on #N` in the body | sub-issue order, then blocking relations (`get_issue`) |
+| close an issue | `gh issue close <n>` | `save_issue` with `id` and `state` set to the team's done status (`list_issue_statuses`) |
+
+Code, branches and PRs stay on GitHub with both trackers.
+
 ## Priority
 
-1. **GitHub issue priority label** (P0/P1/P2 or priority-N) — primary.
-2. Dependency edges (`Depends on #N` in body) before number order.
+Priority applies to tasks.
+
+1. **Tracker priority** — primary. GitHub: the issue's priority label
+   (P0/P1/P2 or priority-N). Linear: the issue's own priority field
+   (Urgent, High, Medium, Low; No priority last).
+2. Dependency edges (see the table above) before number order.
 
 ## Signals
+
+Signals apply to tasks. On Linear:
+
+- a `ready-for-agent` label, or assignment to the bot's Linear user (`me` in
+  the Linear tools), is the dispatch signal;
+- a mention of that user in a comment is a message to orca, unless orca
+  wrote the comment itself;
+- Linear has no repo permission check, so for now orca trusts the members of
+  the Linear team that `orca-project.sh linear.team` names. Say so in the
+  first digest of the session. A comment from anyone else is surfaced in the
+  digest and not acted on;
+- the watcher polls GitHub only, so a change on Linear does not wake orca
+  yet. Poll the Linear issues on the normal cadence. The watcher task is
+  https://github.com/iQonAi/orca/issues/53.
+
+On GitHub:
 
 - Issue **assigned to the bot handle** = meant for agent development (same
   as ready-for-agent — dispatchable).
@@ -145,22 +201,25 @@ to subagent workers.
   etc.), note it in the digest and move on — full sweep at end of
   initiative.
 
-## Worker lifecycle (per issue)
+## Worker lifecycle (per task)
 
-1. Comment implementation plan on the issue; label with priority and
+The tracker commands are in the table under Epics and tasks.
+
+1. Comment implementation plan on the task; label with priority and
    workflow state (`ready-for-agent` = dispatch without asking,
    `needs-info` = wait).
 2. `git worktree add .claude/worktrees/<slug> -b feat/<slug>` at primary
    root.
 3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`. Add
    the issue number to the watcher's ignore set (`--ignore`, full set) before
-   the worker starts pushing.
+   the worker starts pushing. A Linear task has no GitHub number, so only its
+   PR goes in the set.
 4. House rules: workers follow the project's own contribution rules
    (CLAUDE.md / CONTRIBUTING) where they exist; orca adds no formatting or
    code style rules of its own.
 5. Verify development by running the project's
    `build | lint | typecheck | test` commands if available.
-6. Push branch → PR `Closes #N`. Never commit/merge local main. Add the PR
+6. Push branch → PR `Closes #N` (Linear: `Closes <task ID>`). Never commit/merge local main. Add the PR
    number to the ignore set beside its issue: the review cycle below is a
    stream of your own comments and pushes.
 7. Review cycle: after PR creation, request the project's configured
@@ -181,6 +240,8 @@ to subagent workers.
 9. Teardown: EXIT worktree before `git worktree remove`; delete branch local
    - origin; release claims; board row → done; rewrite the ignore set without
    the merged issue and PR, so anything that happens on them wakes you again.
+   Close the task if it is still open. If it was the last open task of its
+   epic, close the epic too.
 
 ## Language Guidelines
 
@@ -204,4 +265,5 @@ Goal: a reader should get the point without decoding it. Prefer a plain sentence
 ## Digest format (every cycle)
 
 Landed / Running / Blocked / Queue-next. The first digest of a session
-opens with the identity it runs as: `running as <login>`.
+opens with the identity it runs as: `running as <login>`. Running and
+queued tasks are grouped under their epic; a task on its own stands alone.

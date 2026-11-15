@@ -305,7 +305,30 @@ On session start the hook injects the watcher directive; orca launches
 assess open issues, plan, dispatch, review, merge, digest. The first digest
 names the account it runs as.
 
-Signals orca reacts to:
+Orca reads the tracker, GitHub or Linear, from the project data file; see
+[Project data](#project-data). Without the file it uses GitHub issues and
+suggests `orca init` once in the first digest. In either tracker, work is
+modelled as epics and tasks:
+
+- An **epic** is a parent issue that describes a feature. Orca comments a
+  plan on it that splits it into tasks and creates each task as a sub-issue.
+  Orca never dispatches the epic itself.
+- A **task** is a sub-issue. Orca dispatches each task to a worker, which
+  opens one PR for it. Code, branches and PRs stay on GitHub with both
+  trackers.
+- An issue with no parent and no sub-issues is a task on its own, so a
+  single issue works as before.
+- When every task is closed, orca closes the epic and reports it under
+  Landed. The digest groups running and queued tasks under their epic.
+
+On Linear, orca uses the Linear MCP tools, takes the priority from Linear's
+priority field, and treats a `ready-for-agent` label or assignment to the
+bot's Linear user as the signal. Linear has no repository permission check,
+so for now orca trusts the members of the Linear team named in
+`.orca/project.json`. The watcher polls GitHub only, so a change on Linear
+does not wake orca yet; it sees Linear changes on its normal poll cadence.
+
+Signals orca reacts to on GitHub:
 
 - An issue **assigned to the bot handle** is dispatchable agent work.
 - Any **@bot-handle mention** in an issue or PR comment is a message to orca —
