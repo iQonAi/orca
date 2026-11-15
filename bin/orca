@@ -11,7 +11,7 @@
 #                      the origin remote of the current directory
 #   --help             usage
 #   init               write .orca/project.json for this checkout and open a
-#                      PR with it (#55); see orca_init below
+#                      PR with it; see orca_init below
 #   Anything else is passed through to claude.
 #
 # Orca acts as a GitHub account of its own. Its token lives in
@@ -97,7 +97,7 @@ EOF
 }
 
 # --- init --------------------------------------------------------------------
-# orca init: writes the project data file (#55) and opens a PR with it. Every
+# orca init: writes the project data file and opens a PR with it. Every
 # refusal comes before the first question, and every answer is validated by
 # the reader before the user's repository is touched:
 #   - the file must not exist in the working tree, in HEAD or on origin's

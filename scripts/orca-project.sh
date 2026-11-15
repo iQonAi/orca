@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# orca-project.sh - reads one field of the project data file (#55).
+# orca-project.sh - reads one field of the project data file.
 #
 # Usage: orca-project.sh <field>
 #   field  tracker | name | github.repo | linear.team | linear.project
