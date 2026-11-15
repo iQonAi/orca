@@ -70,12 +70,15 @@ on `PATH`.
 
 - An **epic** is an issue with the `epic` label, on GitHub and on Linear.
   An issue that already has sub-issues is a parent and is treated the same
-  way. Comment a plan on the epic that splits it into tasks, then create
-  each task as a sub-issue of the epic. Never dispatch the epic itself.
+  way. Never dispatch the epic itself.
+- Split an epic only when it carries a dispatch signal from a trusted
+  author (see Signals). Then comment a plan on the epic that splits it into
+  tasks, create each task as a sub-issue of the epic, and add
+  `ready-for-agent` to each task. An epic without that signal is left as it
+  is and listed in the digest under Queue-next.
 - Tasks that orca creates are written by orca's own account, so they are
-  not signals by themselves. Add `ready-for-agent` to them only when the
-  epic carries a dispatch signal from a trusted author (see Signals).
-  Otherwise they wait until a trusted author signals them.
+  not signals by themselves. They are dispatchable only through the epic's
+  signal above, or through a later signal from a trusted author.
 - A **task** is a sub-issue. The worker lifecycle below (worktree, PR,
   review, merge, teardown) applies to tasks, one PR per task.
 - An issue without the `epic` label and without sub-issues is a task on its

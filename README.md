@@ -314,12 +314,12 @@ suggests `orca init` once in the first digest. In either tracker, work is
 modelled as epics and tasks:
 
 - An **epic** is an issue with the `epic` label, on GitHub and on Linear. An
-  issue that already has sub-issues is treated the same way. Orca comments a
-  plan on it that splits it into tasks and creates each task as a sub-issue.
-  Orca never dispatches the epic itself.
-- Orca adds `ready-for-agent` to the tasks it creates only when the epic
-  carries a dispatch signal from a trusted author. Otherwise the tasks wait
-  for a trusted author to signal them.
+  issue that already has sub-issues is treated the same way. Orca never
+  dispatches the epic itself.
+- Orca splits an epic only when it carries a dispatch signal from a trusted
+  author. It then comments a plan on the epic, creates each task as a
+  sub-issue and adds `ready-for-agent` to each one. An epic without that
+  signal is left as it is.
 - A **task** is a sub-issue. Orca dispatches each task to a worker, which
   opens one PR for it. Code, branches and PRs stay on GitHub with both
   trackers.
