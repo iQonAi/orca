@@ -309,15 +309,15 @@ assess open issues, plan, dispatch, review, merge, digest. The first digest
 names the account it runs as.
 
 Orca reads the tracker, GitHub or Linear, from the project data file; see
-[Project data](#project-data). Without the file it uses GitHub issues and
-suggests `orca init` once in the first digest. In either tracker, work is
-modelled as epics and tasks:
+[Project data](#project-data). When a session starts without the file,
+orca asks you for the values, runs `orca init` with your answers, and takes
+the init PR through review to merge like any other PR. In either tracker,
+work is modelled as epics and tasks:
 
 - An **epic** is an issue with the `epic` label, on GitHub and on Linear. An
   issue that already has sub-issues is treated the same way. Orca never
   dispatches the epic itself.
-- Orca splits an epic only when it carries a dispatch signal from a trusted
-  author. It then comments a plan on the epic, creates each task as a
+- Orca splits an epic only when it carries a dispatch signal. It then comments a plan on the epic, creates each task as a
   sub-issue and adds `ready-for-agent` to each one. An epic without that
   signal is left as it is.
 - A **task** is a sub-issue. Orca dispatches each task to a worker, which
@@ -325,16 +325,23 @@ modelled as epics and tasks:
   trackers.
 - An issue without the `epic` label and without sub-issues is a task on its
   own, so a single issue works as before.
+- A task labelled `HITL` (human in the loop) is dispatched as usual, but
+  orca never merges its PR. It asks you before any step that changes
+  direction and lists the PR in the digest as waiting for a human. Orca adds
+  `HITL` itself when it splits an epic and a task needs a human, or when the
+  epic or the task says so.
+- An issue labelled `no-agent` is never dispatched, on GitHub or Linear,
+  even when it is assigned to orca or labelled `ready-for-agent`.
 - When every task is closed, orca closes the epic and reports it under
   Landed. The digest groups running and queued tasks under their epic.
 
 On Linear, orca uses the Linear MCP tools and takes the priority from
 Linear's priority field. At startup it reads the Linear account it acts as
 and names it in the first digest (`linear as <name>`). A `ready-for-agent`
-label, or assignment to that account, is the signal. Assignment counts only
-when the account is a dedicated bot user. Linear has no repository
-permission check, so orca trusts only the members of the Linear team named
-in `.orca/project.json`; see
+label, or assignment to that account, is the signal, whoever created the
+issue. Assignment counts only when the account is a dedicated bot user. A
+comment that mentions orca is an instruction only when a member of the
+Linear team named in `.orca/project.json` wrote it; see
 [Issue and PR comments are an instruction channel](#issue-and-pr-comments-are-an-instruction-channel).
 The watcher polls GitHub only, so a change on Linear does not wake orca
 yet. Orca reads recently updated Linear issues and their comments on each
@@ -406,6 +413,12 @@ That branch and your working tree do not change, so the file reaches the
 default branch only through the PR. The push and the PR use your own `git`
 and `gh` credentials, not the bot's token.
 
+Orca also runs `orca init` itself when a session starts without the file.
+It asks you for each value first and feeds your answers to `orca init` on
+stdin. It then handles the init PR like any other PR: review, approval,
+merge, teardown. Inside the orca session, `gh` uses the bot's token that
+the launcher exported, so that PR is opened as the bot.
+
 ### gh-watch.sh exit codes
 
 | Exit | Meaning                                                                     |
@@ -451,11 +464,11 @@ anything.
 `agents/orca.md` defines two signals: an issue **assigned to the bot handle**
 is dispatchable work, and **any `@bot-handle` mention** in an issue or PR
 comment is "a message TO this orchestrator session; read it and dispatch/act
-accordingly" (`agents/orca.md:144-151`).
+accordingly" (`agents/orca.md:161-168`).
 
 The playbook tells orca to ignore its own comments and to act only on
 instructions from accounts with write access or better, surfacing the rest in
-the digest (`agents/orca.md:152-159`). That is a prompt instruction, not
+the digest (`agents/orca.md:169-176`). That is a prompt instruction, not
 enforced code: no script in this repo checks the author, so treat it as a
 mitigation, not a boundary. On a public repo, every drive-by commenter is
 still addressing an agent that can run commands on your machine and merge to
@@ -471,14 +484,15 @@ the people who can write or merge.
 On a public repo the audience is everyone, and you are the allow-list: read
 every incoming comment yourself.
 
-On a Linear project the trust boundary is different. Linear has no
-repository permission check, so orca trusts every member of the Linear team
-named in `.orca/project.json`, whether or not they have access to the
-repository. A comment or a dispatch signal from anyone outside that team is
-surfaced in the digest and not acted on. No Linear tool shows who added a
-label or made an assignment, so orca checks the issue's creator instead: an
-issue that a team member filed is dispatched even when someone outside the
-team added `ready-for-agent`. Orca should act as a dedicated bot Linear
+On a Linear project the trust boundary is different, and wider. Linear has
+no repository permission check. The dispatch boundary is anyone who can
+label or assign an issue: any issue labelled `ready-for-agent` or assigned
+to orca's Linear user is dispatched, whoever created it, integrations
+included. The opt-out is the `no-agent` label, which stops dispatch on any
+issue. Comments are narrower: orca acts on a mention only when a member of
+the Linear team named in `.orca/project.json` wrote it, whether or not they
+have access to the repository. A mention from anyone else is surfaced in
+the digest and not acted on. Orca should act as a dedicated bot Linear
 user. If it finds a human account instead, it says so in the digest and
 ignores assignments, because every issue that person assigns to themselves
 would otherwise look like work for orca.
@@ -490,9 +504,9 @@ On your machine:
 - Runs `gh-watch.sh` as a long-lived background job polling GitHub every 30s
   (`scripts/gh-watch.sh`).
 - Creates git worktrees and branches under `.claude/worktrees/`, and writes
-  scratch state under `.claude/scratch/` (`agents/orca.md:251-256`).
+  scratch state under `.claude/scratch/` (`agents/orca.md:268-273`).
 - Dispatches subagent workers that edit files and run the project's
-  `build | lint | typecheck | test` commands (`agents/orca.md:260-261`).
+  `build | lint | typecheck | test` commands (`agents/orca.md:277-278`).
 - **Claude-style install only:** `install.sh` symlinks (or copies) the agent,
   hook, and watcher into `~/.claude/` and adds a `SessionStart` hook to
   `~/.claude/settings.json` (`install.sh:78-114`). That is a global change, not
@@ -542,13 +556,13 @@ at prose, not at code that enforces it.
 | Verify the token and read the bot's login and id                 | `bin/orca` — `gh api user`                                       | read user profile        |
 | Read the bot's permission on the repository                      | `bin/orca` — `gh api repos/<repo>/collaborators/<login>/permission` | read repo metadata    |
 | Poll open issues and PRs every 30s — number, `updatedAt`, labels only | `scripts/gh-watch.sh:378` — `gh issue list`, `gh pr list`    | read issues and PRs      |
-| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:104` — `gh repo view`, when no repo is given; `agents/orca.md:43` reads it with `orca-project.sh github.repo`, which makes no API call | read repo metadata       |
-| Read issue assignees and recent comments each cycle              | `agents/orca.md:147-148`                                           | read issues              |
-| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:247-250`                                         | write issues             |
-| Push the worker branch                                           | `agents/orca.md:262`                                             | write repo contents      |
-| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:262`, `agents/orca.md:272-276`                   | write pull requests      |
-| Request an external reviewer                                     | `agents/orca.md:268` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
-| Merge the PR                                                     | `agents/orca.md:277`                                             | write contents and PRs   |
+| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:104` — `gh repo view`, when no repo is given; `agents/orca.md:52` reads it with `orca-project.sh github.repo`, which makes no API call | read repo metadata       |
+| Read issue assignees and recent comments each cycle              | `agents/orca.md:164-165`                                           | read issues              |
+| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:264-267`                                         | write issues             |
+| Push the worker branch                                           | `agents/orca.md:279`                                             | write repo contents      |
+| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:279`, `agents/orca.md:289-293`                   | write pull requests      |
+| Request an external reviewer                                     | `agents/orca.md:285` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
+| Merge the PR                                                     | `agents/orca.md:294`                                             | write contents and PRs   |
 
 Net, for the bot's fine-grained token: Metadata: read, Issues: read/write,
 Contents: read/write, Pull requests: read/write — plus Workflows: write if a
@@ -583,7 +597,7 @@ every 30s), counting against the bot token's GraphQL rate limit.
 
 ### What gates a merge
 
-The worker lifecycle in `agents/orca.md:266-280` specifies:
+The worker lifecycle in `agents/orca.md:283-298` specifies:
 
 1. An internal review agent is spawned for every PR, checking issue completion,
    security, maintainability, and bugs. Its findings are posted as PR review
@@ -598,7 +612,9 @@ The worker lifecycle in `agents/orca.md:266-280` specifies:
 6. **`on-hold` gate:** an `on-hold` label on the PR or its issue blocks merge
    and dispatch until the label is removed or a bot-handle comment signs off.
 7. On issues, a `needs-info` label means wait; `ready-for-agent` means dispatch
-   without asking (`agents/orca.md:247-250`).
+   without asking (`agents/orca.md:264-267`).
+8. **`HITL` gate:** orca never merges the PR of a task labelled `HITL`; it
+   lists the PR in the digest as waiting for a human (`agents/orca.md:297-298`).
 
 **These gates are prompt instructions, not enforced code.** The executable
 files in this repo are the watcher, the SessionStart hook, the installer, and
@@ -612,13 +628,13 @@ as well as the model follows its playbook.
   GitHub's own enforcement applies to it as to any other client — but that has
   not been tested here, and the playbook defines no handling for a merge GitHub
   rejects. The playbook does say never to commit or merge local `main`
-  (`agents/orca.md:262-263`); work always goes through a branch and a PR.
+  (`agents/orca.md:279-280`); work always goes through a branch and a PR.
 - **There is no dry-run or approval mode.** No flag, environment variable, or
   setting in this repo makes orca plan without acting, or ask before it
   comments, pushes, or merges. Once running, it acts on its own.
 - **Token cost per cycle is unmeasured.** Every watcher exit re-invokes the
   model, and the poll cadence adapts between 60s and ~1800s depending on
-  activity (`agents/orca.md:168-171`), so cost scales with how busy the repo is.
+  activity (`agents/orca.md:185-189`), so cost scales with how busy the repo is.
   No measured figure is available; tracked in
   [#23](https://github.com/iQonAi/orca/issues/23).
 - **The `agents` install style is untested.** Orca has never been run under a
