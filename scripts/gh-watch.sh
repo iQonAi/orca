@@ -231,7 +231,7 @@ repo_re="$(printf '%s' "$repo" | sed 's/[]\.[*^$+?(){}|]/\\&/g')"
 # Mode words are allowed generically, not one by one: a watcher launched as
 # `gh-watch.sh --takeover <repo>` keeps that word in its argv for the rest of
 # its life, and matching only the bare form answered "none running" about a
-# watcher that was polling (#30). Two limits on that are worth stating plainly:
+# watcher that was polling. Two limits on that are worth stating plainly:
 #
 #   - The match set really did grow. `gh-watch.sh --status`, a wrapper
 #     `sh -c '... gh-watch.sh --status'` and `vim scripts/gh-watch.sh --nofork`
@@ -526,7 +526,7 @@ fi
 # That REST listing served inconsistent EMPTY responses for minutes at a time
 # from a bad replica — it answered `[]` while `gh pr list` returned the PR that
 # was open — and a watcher reading one of those as "everything just closed"
-# reports a change that never happened (#32). `gh issue list` and `gh pr list`
+# reports a change that never happened. `gh issue list` and `gh pr list`
 # stayed consistent through every observed flake window. They take two calls
 # because `gh issue list` excludes pull requests, where the REST listing
 # included them; the concatenation is sorted so listing order alone can never

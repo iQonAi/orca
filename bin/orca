@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # orca - launcher. Runs the preflight checks, exports the bot's GitHub
-# identity and execs `claude --agent orca` (#43).
+# identity and execs `claude --agent orca`.
 #
 # Usage: orca [--check] [--repo owner/repo] [claude args...]
 #        orca init

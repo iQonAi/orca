@@ -103,7 +103,7 @@ if [ -z "$script_dir" ] || [ ! -f "$script_dir/agents/orca.md" ]; then
   # The strip pattern in the second branch is quoted for the same reason the
   # patterns are: unquoted, `${ORCA_REPO#~/}` tilde-expands its OWN pattern to
   # `$HOME/`, never strips the literal `~/`, and resolves "~/x" to "$HOME/~/x"
-  # - a directory literally named `~`. That was #24; test/run.sh now covers it.
+  # - a directory literally named `~`. test/run.sh covers this case.
   # shellcheck disable=SC2088
   case "$ORCA_REPO" in
     "~") ORCA_REPO="$HOME" ;;
@@ -182,7 +182,7 @@ resolve_style() {
     esac
   else
     # An existing ~/.claude is not consent: inferring the claude style from
-    # it edited settings.json on a guess, with only a notice (#16). A value
+    # it edited settings.json on a guess, with only a notice. A value
     # that is set but not a style (a typo in CI) is named, not called unset.
     if [ -n "${ORCA_STYLE:-}" ]; then
       echo "no tty and ORCA_STYLE=$ORCA_STYLE is not claude or agents; re-run with ORCA_STYLE=claude or ORCA_STYLE=agents" >&2
@@ -242,7 +242,7 @@ install_claude() {
   CH="${CLAUDE_HOME:-$HOME/.claude}"
   # Trailing slashes are dropped: `/x/` is the same home as `/x`, but the
   # hook identity built from it would read `/x//hooks/...` and match neither
-  # a hand-wired `/x/hooks/...` nor, on --uninstall, its own entry (#38).
+  # a hand-wired `/x/hooks/...` nor, on --uninstall, its own entry.
   # The inner expansion is the trailing run of slashes; the outer strips it.
   CH="${CH%"${CH##*[!/]}"}"
   mkdir -p "$CH/agents" "$CH/hooks" "$CH/scripts"
@@ -275,7 +275,7 @@ wire_claude_hook() {
   entry=$(jq -nc --arg c "$hook_cmd" '{hooks:[{type:"command",command:$c}]}')
   # Wired means an entry whose hooks[].command names the hook, whatever else
   # it carries. Exact equality with $entry missed a hand-edited one (a
-  # `matcher`, a `timeout`) and appended a second copy on every run (#15).
+  # `matcher`, a `timeout`) and appended a second copy on every run.
   # Both spellings count, as in unwire_claude_hook; for a custom CLAUDE_HOME
   # they collapse to its own absolute form, so a separate default install
   # never counts as this one.
@@ -647,7 +647,7 @@ case "$STYLE" in
 esac
 # Plain `if`, not `[ ... ] && echo`: under set -e a false test in an && list
 # does not abort, but as the LAST statement it is the exit status - 1, with
-# no diagnostic - so the form must not depend on what follows it (#17).
+# no diagnostic - so the form must not depend on what follows it.
 if [ -n "$BACKUP_DIR" ]; then
   echo "replaced files moved to $BACKUP_DIR (after --uninstall, --restore $TS puts them back)"
 fi
