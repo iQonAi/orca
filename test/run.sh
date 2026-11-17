@@ -1158,6 +1158,249 @@ run_watch_seq 0 'CHANGE DETECTED' \
   'gh-watch: a backslash escape in the ignore file is not decoded into a number' \
   'octocat/watch-ign-escape' "$SEQ_ESC"
 
+# ---------------------------------------------------------------------------
+# gh-watch.sh — Linear mode
+#
+# The mode comes from .orca/project.json in the working directory, so these
+# cases run the watcher from temp git repos that hold one. A stub `curl` on
+# PATH replaces the Linear API. It answers from CURL_STUB_SEQ the way the `gh`
+# stub answers from GH_STUB_SEQ (one line per call, the last line repeats,
+# `FAIL` exits non-zero), and it records its argv and its stdin, so a case can
+# prove where the key went. The stub lives in its own directory, so no other
+# case ever sees it.
+#
+# The key is a fake one, and it is set per run: the environment running the
+# suite may hold a real LINEAR_API_KEY, and no case may send or record it.
+LIN_BIN="$GH_TMP/linbin"
+mkdir -p "$LIN_BIN"
+cat >"$LIN_BIN/curl" <<'STUB'
+#!/usr/bin/env bash
+[ -n "${CURL_STUB_ARGV-}" ] && printf '%s\n' "$@" >>"$CURL_STUB_ARGV"
+stdin="$(cat)"
+[ -n "${CURL_STUB_STDIN-}" ] && printf '%s\n' "$stdin" >>"$CURL_STUB_STDIN"
+seq_file="${CURL_STUB_SEQ-}"
+[ -n "$seq_file" ] && [ -f "$seq_file" ] || exit 22
+n="$(cat "$seq_file.n" 2>/dev/null)"
+case "$n" in '' | *[!0-9]*) n=1 ;; esac
+printf '%s\n' "$((n + 1))" >"$seq_file.n"
+last="$(grep -c '' "$seq_file")"
+line_no="$n"
+[ "$line_no" -gt "$last" ] && line_no="$last"
+answer="$(sed -n "${line_no}p" "$seq_file")"
+[ "$answer" = FAIL ] && exit 22
+printf '%s' "$answer"
+STUB
+chmod +x "$LIN_BIN/curl"
+LIN_KEY='lin_api_TESTKEY_never_in_argv_7f3c'
+
+# lin_proj <dir> <json> — a git repo whose .orca/project.json is <json>.
+lin_proj() {
+  mkdir -p "$1/.orca"
+  git -C "$1" init -q
+  printf '%s\n' "$2" >"$1/.orca/project.json"
+}
+LIN_DIR="$GH_TMP/lin-proj"
+lin_proj "$LIN_DIR" '{"version":1,"name":"Lin","tracker":"linear","github":{"repo":"octocat/lin"},"linear":{"team":"IQONAI","project":"Devbox"}}'
+LIN_GH_DIR="$GH_TMP/lin-gh-proj"
+lin_proj "$LIN_GH_DIR" '{"version":1,"name":"Gh","tracker":"github","github":{"repo":"octocat/lin-gh"}}'
+
+# lin_issue <identifier> <state> <assignee|""> <labels,csv> [comment time...]
+#   One issue node as the Linear API returns it, on one line.
+# lin_page <issue>... — one Linear response holding those issues, on one line.
+lin_issue() {
+  jq -cn --arg id "$1" --arg st "$2" --arg as "$3" --arg lb "$4" --args '
+    {identifier: $id, state: {name: $st},
+     assignee: (if $as == "" then null else {displayName: $as} end),
+     labels: {nodes: [$lb | split(",")[] | select(. != "") | {name: .}]},
+     comments: {nodes: [$ARGS.positional[] | {createdAt: .}]}}' "${@:5}"
+}
+lin_page() {
+  local IFS=,
+  printf '{"data":{"issues":{"nodes":[%s]}}}\n' "$*"
+}
+# The GitHub side of every Linear case: both listings succeed and hold nothing.
+LIN_GH_EMPTY="$GH_TMP/seq-lin-gh-empty"
+printf '\n' >"$LIN_GH_EMPTY"
+
+# run_lin <expected_exit> <stdout_substr|EMPTY> <desc> <dir> <repo>
+#         <curl_seq> <key> [argv_file] [stdin_file] [gh_seq]
+#   A watcher run in the foreground from <dir>, with the poll interval
+#   compressed. The output lands in LIN_OUT for follow-up assertions.
+run_lin() {
+  local expected_exit="$1" substr="$2" desc="$3" dir="$4" repo="$5" curl_seq="$6" key="$7"
+  local argv_file="${8-}" stdin_file="${9-}" gh_seq="${10:-$LIN_GH_EMPTY}" actual
+  LIN_OUT="$(cd "$dir" && PATH="$LIN_BIN:$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="$gh_seq" \
+    CURL_STUB_SEQ="$curl_seq" CURL_STUB_ARGV="$argv_file" CURL_STUB_STDIN="$stdin_file" \
+    LINEAR_API_KEY="$key" GH_WATCH_CONFIRM_DELAY=1 "$BASH_BIN" "$WATCH_SCRIPT" "$repo" 2>&1)"
+  actual=$?
+  if [[ "$actual" != "$expected_exit" ]]; then
+    printf 'FAIL: %s\n      expected exit %s, got %s (output: %s)\n' \
+      "$desc" "$expected_exit" "$actual" "$LIN_OUT" >&2
+    fail=$((fail + 1))
+    return
+  fi
+  if [[ "$substr" != "EMPTY" && "$LIN_OUT" != *"$substr"* ]]; then
+    printf 'FAIL: %s\n      stdout missing substring: %s\n      got: %s\n' \
+      "$desc" "$substr" "$LIN_OUT" >&2
+    fail=$((fail + 1))
+    return
+  fi
+  printf 'ok:   %s\n' "$desc"
+  pass=$((pass + 1))
+}
+
+# start_lin <dir> <repo> <curl_seq> [gh_seq] — a live Linear-mode watcher run
+# from <dir>; returns its pid in REPLY once it has taken the pidfile.
+start_lin() {
+  (cd "$1" && PATH="$LIN_BIN:$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="${4:-$LIN_GH_EMPTY}" \
+    CURL_STUB_SEQ="$3" LINEAR_API_KEY="$LIN_KEY" GH_WATCH_CONFIRM_DELAY=1 \
+    exec "$BASH_BIN" "$WATCH_SCRIPT" "$2") >/dev/null 2>&1 &
+  track_live "$!" "$2"
+}
+
+# A GitHub project is the GitHub watcher it always was: a file that says
+# `github` needs no key, never calls curl and fires on a GitHub change.
+SEQ_LGH="$GH_TMP/seq-lin-gh"
+printf '%s\n' '7 2026-11-16T10:00:00Z' '7 2026-11-16T10:01:00Z' '7 2026-11-16T10:01:00Z' >"$SEQ_LGH"
+LGH_ARGV="$GH_TMP/lin-gh.argv"
+run_lin 0 '7 2026-11-16T10:01:00Z' \
+  'gh-watch: a project whose tracker is github fires on a GitHub change, with no key' \
+  "$LIN_GH_DIR" 'octocat/lin-gh' "$GH_TMP/no-such-curl-seq" '' "$LGH_ARGV" '' "$SEQ_LGH"
+wassert 'gh-watch: a project whose tracker is github never calls the Linear API' \
+  test ! -e "$LGH_ARGV"
+
+# Linear baseline, then one kind of change per run. The baseline row is
+# IQONAI-28 in Todo, assigned to alice, labelled bug, with one comment.
+LIN_BASE="$(lin_page "$(lin_issue IQONAI-28 Todo alice bug 2026-11-16T09:00:00.000Z)")"
+lin_change() { # <name> <changed page> -> a sequence file: baseline, then the change twice
+  printf '%s\n' "$LIN_BASE" "$2" "$2" >"$GH_TMP/seq-lin-$1"
+  REPLY="$GH_TMP/seq-lin-$1"
+}
+lin_change labels "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug,p1 2026-11-16T09:00:00.000Z)")"
+run_lin 0 'IQONAI-28 Todo|alice|1|2026-11-16T09:00:00.000Z bug,p1' \
+  'gh-watch: linear: a label change fires and reports the row' \
+  "$LIN_DIR" 'octocat/lin-labels' "$REPLY" "$LIN_KEY"
+lin_change comment "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug 2026-11-16T09:00:00.000Z 2026-11-16T09:30:00.000Z)")"
+run_lin 0 'IQONAI-28 Todo|alice|2|2026-11-16T09:30:00.000Z bug' \
+  'gh-watch: linear: a new comment fires' \
+  "$LIN_DIR" 'octocat/lin-comment' "$REPLY" "$LIN_KEY"
+lin_change status "$(lin_page "$(lin_issue IQONAI-28 'In Progress' alice bug 2026-11-16T09:00:00.000Z)")"
+run_lin 0 'IQONAI-28 In_Progress|alice|1|2026-11-16T09:00:00.000Z bug' \
+  'gh-watch: linear: a status change fires, with whitespace in the status kept in one field' \
+  "$LIN_DIR" 'octocat/lin-status' "$REPLY" "$LIN_KEY"
+lin_change unassign "$(lin_page "$(lin_issue IQONAI-28 Todo '' bug 2026-11-16T09:00:00.000Z)")"
+run_lin 0 'IQONAI-28 Todo|-|1|2026-11-16T09:00:00.000Z bug' \
+  'gh-watch: linear: an assignee change fires' \
+  "$LIN_DIR" 'octocat/lin-unassign' "$REPLY" "$LIN_KEY"
+
+# Linear rows and GitHub rows are one snapshot: the PR side still fires.
+SEQ_LMIX="$GH_TMP/seq-lin-mix"
+printf '%s\n' "$LIN_BASE" >"$SEQ_LMIX"
+SEQ_LMIX_GH="$GH_TMP/seq-lin-mix-gh"
+printf '%s\n' '' '9 2026-11-16T11:00:00Z' '9 2026-11-16T11:00:00Z' >"$SEQ_LMIX_GH"
+run_lin 0 'IQONAI-28 Todo|alice|1|2026-11-16T09:00:00.000Z bug' \
+  'gh-watch: linear: a GitHub change still fires, reported beside the Linear rows' \
+  "$LIN_DIR" 'octocat/lin-mix' "$SEQ_LMIX" "$LIN_KEY" '' '' "$SEQ_LMIX_GH"
+
+# A failed Linear baseline is a failed baseline: exit 1, as for GitHub. A
+# GraphQL error arrives as a successful HTTP answer, and it fails the same way.
+SEQ_LFAIL="$GH_TMP/seq-lin-fail"
+printf '%s\n' FAIL >"$SEQ_LFAIL"
+run_lin 1 'baseline fetch failed' \
+  'gh-watch: linear: a failed Linear baseline exits 1' \
+  "$LIN_DIR" 'octocat/lin-fail' "$SEQ_LFAIL" "$LIN_KEY"
+SEQ_LGQL="$GH_TMP/seq-lin-gqlerr"
+printf '%s\n' '{"errors":[{"message":"Authentication required"}]}' >"$SEQ_LGQL"
+run_lin 1 'baseline fetch failed' \
+  'gh-watch: linear: a GraphQL error on the baseline exits 1' \
+  "$LIN_DIR" 'octocat/lin-gqlerr' "$SEQ_LGQL" "$LIN_KEY"
+wassert 'gh-watch: linear: the failed baselines released their pidfiles' \
+  bash -c "test ! -e '$(watch_pidfile 'octocat/lin-fail')' && test ! -e '$(watch_pidfile 'octocat/lin-gqlerr')'"
+
+# No key: exit 1 before taking the pidfile or calling the API.
+LNOKEY_ARGV="$GH_TMP/lin-nokey.argv"
+run_lin 1 'LINEAR_API_KEY is not set' \
+  'gh-watch: linear: a missing LINEAR_API_KEY exits 1' \
+  "$LIN_DIR" 'octocat/lin-nokey' "$SEQ_LMIX" '' "$LNOKEY_ARGV"
+wassert 'gh-watch: linear: the keyless launch called no API and took no pidfile' \
+  bash -c "test ! -e '$LNOKEY_ARGV' && test ! -e '$(watch_pidfile 'octocat/lin-nokey')'"
+
+# A file the reader rejects stops the launch: it is never read as no file.
+LIN_BAD_DIR="$GH_TMP/lin-bad-proj"
+lin_proj "$LIN_BAD_DIR" '{"version":1,"name":"Bad","tracker":"linear","github":{"repo":"octocat/lin-bad"}}'
+run_lin 1 'could not read the tracker' \
+  'gh-watch: linear: a project file without linear.team exits 1' \
+  "$LIN_BAD_DIR" 'octocat/lin-bad' "$SEQ_LMIX" "$LIN_KEY"
+
+# --ignore takes Linear identifiers beside numbers, and still refuses other
+# shapes.
+run_watch_in "$GH_WATCH_STATE_DIR" 0 'ignoring 53 54 IQONAI-28 for octocat/lin-ign' \
+  'gh-watch: --ignore takes Linear identifiers beside numbers' \
+  '' --ignore '53 54 IQONAI-28' 'octocat/lin-ign'
+run_watch_in "$GH_WATCH_STATE_DIR" 1 'expects issue/PR numbers' \
+  'gh-watch: --ignore refuses an identifier that is not TEAM-123' \
+  '' --ignore 'IQONAI-' 'octocat/lin-ign-bad'
+
+# A change confined to an ignored Linear identifier does not wake the watcher.
+SEQ_LIGN="$GH_TMP/seq-lin-ign"
+printf '%s\n' "$LIN_BASE" \
+  "$(lin_page "$(lin_issue IQONAI-28 Done alice bug 2026-11-16T09:00:00.000Z 2026-11-16T09:40:00.000Z)")" \
+  >"$SEQ_LIGN"
+start_lin "$LIN_DIR" 'octocat/lin-ign' "$SEQ_LIGN"
+LIVE_LIGN="$REPLY"
+wassert 'gh-watch: linear: a change confined to an ignored identifier does not fire (still polling)' \
+  await_calls "$SEQ_LIGN" 6
+wassert 'gh-watch: linear: the watcher that ignored the identifier still holds its pidfile' \
+  test "$(cat "$(watch_pidfile 'octocat/lin-ign')" 2>/dev/null)" = "$LIVE_LIGN"
+
+# --status names the Linear team and project of a live Linear-mode watcher, and
+# says nothing about Linear for a GitHub-mode one.
+run_watch_in "$GH_WATCH_STATE_DIR" 3 'linear: IQONAI/Devbox' \
+  'gh-watch: linear: --status reports the team and project of a Linear-mode watcher' \
+  '' --status 'octocat/lin-ign'
+start_live 'octocat/lin-status-gh'
+LST_GH_OUT="$GH_TMP/lin-status-gh.out"
+PATH="$STUB_BIN:$PATH" "$BASH_BIN" "$WATCH_SCRIPT" --status 'octocat/lin-status-gh' >"$LST_GH_OUT" 2>&1
+wassert 'gh-watch: --status on a GitHub-mode watcher prints no linear line' \
+  bash -c "grep -q 'watcher running' '$LST_GH_OUT' && ! grep -q 'linear:' '$LST_GH_OUT'"
+LIN_TEAM_DIR="$GH_TMP/lin-team-proj"
+lin_proj "$LIN_TEAM_DIR" '{"version":1,"name":"Team","tracker":"linear","github":{"repo":"octocat/lin-team"},"linear":{"team":"IQONAI"}}'
+SEQ_LTEAM="$GH_TMP/seq-lin-team"
+printf '%s\n' "$LIN_BASE" >"$SEQ_LTEAM"
+start_lin "$LIN_TEAM_DIR" 'octocat/lin-team' "$SEQ_LTEAM"
+LIVE_LTEAM="$REPLY"
+LST_TEAM_OUT="$GH_TMP/lin-status-team.out"
+PATH="$STUB_BIN:$PATH" "$BASH_BIN" "$WATCH_SCRIPT" --status 'octocat/lin-team' >"$LST_TEAM_OUT" 2>&1
+wassert 'gh-watch: linear: --status prints the team alone when no project is set' \
+  bash -c "grep -qx 'linear: IQONAI' '$LST_TEAM_OUT'"
+kill -TERM "$LIVE_LTEAM" 2>/dev/null
+await_exit 'octocat/lin-team'
+wassert 'gh-watch: linear: a stopped watcher removes its mode record with its pidfile' \
+  bash -c "test ! -e '$GH_WATCH_STATE_DIR/octocat_lin-team.linear' && test ! -e '$(watch_pidfile 'octocat/lin-team')'"
+
+# THE KEY. It reaches curl on stdin as `Authorization: <key>` (no Bearer), and
+# never in curl's argv, in the watcher's output, or in a state file.
+lin_change key "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug,p1 2026-11-16T09:00:00.000Z)")"
+SEQ_LKEY="$REPLY"
+LKEY_ARGV="$GH_TMP/lin-key.argv"
+LKEY_STDIN="$GH_TMP/lin-key.stdin"
+run_lin 0 'CHANGE DETECTED' \
+  'gh-watch: linear: the run whose curl calls are recorded fires' \
+  "$LIN_DIR" 'octocat/lin-key' "$SEQ_LKEY" "$LIN_KEY" "$LKEY_ARGV" "$LKEY_STDIN"
+wassert 'gh-watch: linear: curl was called and its argv recorded' test -s "$LKEY_ARGV"
+wassert 'gh-watch: linear: the key is not in curl argv' \
+  bash -c "! grep -qF '$LIN_KEY' '$LKEY_ARGV'"
+wassert 'gh-watch: linear: curl reads its header from stdin' \
+  bash -c "grep -qx -- '-H' '$LKEY_ARGV' && grep -qx -- '@-' '$LKEY_ARGV'"
+wassert 'gh-watch: linear: the header on stdin is Authorization: <key>, with no Bearer' \
+  grep -qx "Authorization: $LIN_KEY" "$LKEY_STDIN"
+wassert 'gh-watch: linear: the query filters on the team, the project and the open states' \
+  bash -c "grep -qF '\"key\":{\"eq\":\"IQONAI\"}' '$LKEY_ARGV' && grep -qF '\"name\":{\"eq\":\"Devbox\"}' '$LKEY_ARGV' && grep -qF '\"nin\":[\"completed\",\"canceled\"]' '$LKEY_ARGV'"
+wassert 'gh-watch: linear: the key is not in the watcher output' \
+  bash -c "[[ \"\$1\" != *\"\$2\"* ]]" _ "$LIN_OUT" "$LIN_KEY"
+wassert 'gh-watch: linear: the key is not in any state file' \
+  bash -c "! grep -rqF '$LIN_KEY' '$GH_WATCH_STATE_DIR'"
+
 reap_live_watchers
 unset GH_WATCH_STATE_DIR
 
