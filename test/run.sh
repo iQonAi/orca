@@ -1204,19 +1204,28 @@ lin_proj "$LIN_DIR" '{"version":1,"name":"Lin","tracker":"linear","github":{"rep
 LIN_GH_DIR="$GH_TMP/lin-gh-proj"
 lin_proj "$LIN_GH_DIR" '{"version":1,"name":"Gh","tracker":"github","github":{"repo":"octocat/lin-gh"}}'
 
-# lin_issue <identifier> <state> <assignee|""> <labels,csv> [comment time...]
-#   One issue node as the Linear API returns it, on one line.
-# lin_page <issue>... — one Linear response holding those issues, on one line.
+# lin_issue <identifier> <state> <assignee|""> <labels,csv> [<comment id> <comment updatedAt>]
+#   One issue node as the Linear API returns it, on one line. The comment is
+#   the newest one, the only one the query asks for; none given means none.
+# lin_page <issue>... — one Linear response holding those issues and no next
+#   page, on one line.
+# lin_page_next <cursor> <issue>... — the same, with a next page at <cursor>.
 lin_issue() {
   jq -cn --arg id "$1" --arg st "$2" --arg as "$3" --arg lb "$4" --args '
     {identifier: $id, state: {name: $st},
      assignee: (if $as == "" then null else {displayName: $as} end),
      labels: {nodes: [$lb | split(",")[] | select(. != "") | {name: .}]},
-     comments: {nodes: [$ARGS.positional[] | {createdAt: .}]}}' "${@:5}"
+     comments: {nodes: (if $ARGS.positional == [] then []
+       else [{id: $ARGS.positional[0], updatedAt: $ARGS.positional[1]}] end)}}' "${@:5}"
 }
 lin_page() {
   local IFS=,
-  printf '{"data":{"issues":{"nodes":[%s]}}}\n' "$*"
+  printf '{"data":{"issues":{"nodes":[%s],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}\n' "$*"
+}
+lin_page_next() {
+  local cursor="$1" IFS=,
+  shift
+  printf '{"data":{"issues":{"nodes":[%s],"pageInfo":{"hasNextPage":true,"endCursor":"%s"}}}}\n' "$*" "$cursor"
 }
 # The GitHub side of every Linear case: both listings succeed and hold nothing.
 LIN_GH_EMPTY="$GH_TMP/seq-lin-gh-empty"
@@ -1249,12 +1258,13 @@ run_lin() {
   pass=$((pass + 1))
 }
 
-# start_lin <dir> <repo> <curl_seq> [gh_seq] — a live Linear-mode watcher run
-# from <dir>; returns its pid in REPLY once it has taken the pidfile.
+# start_lin <dir> <repo> <curl_seq> [gh_seq] [outfile] — a live Linear-mode
+# watcher run from <dir>, its output in <outfile> when one is given; returns
+# its pid in REPLY once it has taken the pidfile.
 start_lin() {
   (cd "$1" && PATH="$LIN_BIN:$FAST_BIN:$STUB_BIN:$PATH" GH_STUB_SEQ="${4:-$LIN_GH_EMPTY}" \
     CURL_STUB_SEQ="$3" LINEAR_API_KEY="$LIN_KEY" GH_WATCH_CONFIRM_DELAY=1 \
-    exec "$BASH_BIN" "$WATCH_SCRIPT" "$2") >/dev/null 2>&1 &
+    exec "$BASH_BIN" "$WATCH_SCRIPT" "$2") >"${5:-/dev/null}" 2>&1 &
   track_live "$!" "$2"
 }
 
@@ -1271,34 +1281,103 @@ wassert 'gh-watch: a project whose tracker is github never calls the Linear API'
 
 # Linear baseline, then one kind of change per run. The baseline row is
 # IQONAI-28 in Todo, assigned to alice, labelled bug, with one comment.
-LIN_BASE="$(lin_page "$(lin_issue IQONAI-28 Todo alice bug 2026-11-16T09:00:00.000Z)")"
+LIN_BASE="$(lin_page "$(lin_issue IQONAI-28 Todo alice bug c1 2026-11-16T09:00:00.000Z)")"
 lin_change() { # <name> <changed page> -> a sequence file: baseline, then the change twice
   printf '%s\n' "$LIN_BASE" "$2" "$2" >"$GH_TMP/seq-lin-$1"
   REPLY="$GH_TMP/seq-lin-$1"
 }
-lin_change labels "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug,p1 2026-11-16T09:00:00.000Z)")"
-run_lin 0 'IQONAI-28 Todo|alice|1|2026-11-16T09:00:00.000Z bug,p1' \
+lin_change labels "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug,p1 c1 2026-11-16T09:00:00.000Z)")"
+run_lin 0 'IQONAI-28 Todo|alice|c1|2026-11-16T09:00:00.000Z bug,p1' \
   'gh-watch: linear: a label change fires and reports the row' \
   "$LIN_DIR" 'octocat/lin-labels' "$REPLY" "$LIN_KEY"
-lin_change comment "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug 2026-11-16T09:00:00.000Z 2026-11-16T09:30:00.000Z)")"
-run_lin 0 'IQONAI-28 Todo|alice|2|2026-11-16T09:30:00.000Z bug' \
+lin_change comment "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug c2 2026-11-16T09:30:00.000Z)")"
+run_lin 0 'IQONAI-28 Todo|alice|c2|2026-11-16T09:30:00.000Z bug' \
   'gh-watch: linear: a new comment fires' \
   "$LIN_DIR" 'octocat/lin-comment' "$REPLY" "$LIN_KEY"
-lin_change status "$(lin_page "$(lin_issue IQONAI-28 'In Progress' alice bug 2026-11-16T09:00:00.000Z)")"
-run_lin 0 'IQONAI-28 In_Progress|alice|1|2026-11-16T09:00:00.000Z bug' \
+lin_change status "$(lin_page "$(lin_issue IQONAI-28 'In Progress' alice bug c1 2026-11-16T09:00:00.000Z)")"
+run_lin 0 'IQONAI-28 In_Progress|alice|c1|2026-11-16T09:00:00.000Z bug' \
   'gh-watch: linear: a status change fires, with whitespace in the status kept in one field' \
   "$LIN_DIR" 'octocat/lin-status' "$REPLY" "$LIN_KEY"
-lin_change unassign "$(lin_page "$(lin_issue IQONAI-28 Todo '' bug 2026-11-16T09:00:00.000Z)")"
-run_lin 0 'IQONAI-28 Todo|-|1|2026-11-16T09:00:00.000Z bug' \
+lin_change unassign "$(lin_page "$(lin_issue IQONAI-28 Todo '' bug c1 2026-11-16T09:00:00.000Z)")"
+run_lin 0 'IQONAI-28 Todo|-|c1|2026-11-16T09:00:00.000Z bug' \
   'gh-watch: linear: an assignee change fires' \
   "$LIN_DIR" 'octocat/lin-unassign' "$REPLY" "$LIN_KEY"
+
+# An EDITED newest comment keeps its id and moves its updatedAt: it fires too.
+lin_change edit "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug c1 2026-11-16T09:50:00.000Z)")"
+run_lin 0 'IQONAI-28 Todo|alice|c1|2026-11-16T09:50:00.000Z bug' \
+  'gh-watch: linear: an edit to the newest comment fires' \
+  "$LIN_DIR" 'octocat/lin-edit' "$REPLY" "$LIN_KEY"
+
+# Every open issue is read, page by page. Calls 1-2 are the baseline (page one
+# names a next page, page two ends), calls 3-4 the poll, 5-6 the confirm. The
+# change is on the SECOND page, which one page alone would never see.
+LP1="$(lin_page_next cur-page-2 "$(lin_issue IQONAI-28 Todo alice bug c1 2026-11-16T09:00:00.000Z)")"
+LP2="$(lin_page "$(lin_issue IQONAI-29 Todo bob '' c3 2026-11-16T08:00:00.000Z)")"
+LP2_CHG="$(lin_page "$(lin_issue IQONAI-29 Todo bob p1 c3 2026-11-16T08:00:00.000Z)")"
+SEQ_LPAGES="$GH_TMP/seq-lin-pages"
+printf '%s\n' "$LP1" "$LP2" "$LP1" "$LP2_CHG" "$LP1" "$LP2_CHG" >"$SEQ_LPAGES"
+LPAGES_ARGV="$GH_TMP/lin-pages.argv"
+run_lin 0 'IQONAI-29 Todo|bob|c3|2026-11-16T08:00:00.000Z p1' \
+  'gh-watch: linear: a change on the second page fires' \
+  "$LIN_DIR" 'octocat/lin-pages' "$SEQ_LPAGES" "$LIN_KEY" "$LPAGES_ARGV"
+wassert 'gh-watch: linear: the paged snapshot holds the first page too' \
+  bash -c "[[ \"\$1\" == *'IQONAI-28 Todo|alice|c1|2026-11-16T09:00:00.000Z bug'* ]]" _ "$LIN_OUT"
+wassert 'gh-watch: linear: the first page is asked for with no cursor, the next one after it' \
+  bash -c "grep -qF '\"after\":null' '$LPAGES_ARGV' && grep -qF '\"after\":\"cur-page-2\"' '$LPAGES_ARGV'"
+wassert 'gh-watch: linear: two pages per snapshot, so the fire took exactly six calls' \
+  test "$(cat "$SEQ_LPAGES.n")" = 7
+
+# PAGE LIMIT. A team that always has a next page is a failed fetch after 20
+# pages, never a silently shorter row set: on the baseline, that is exit 1.
+SEQ_LLIMIT="$GH_TMP/seq-lin-limit"
+printf '%s\n' "$LP1" >"$SEQ_LLIMIT"
+run_lin 1 'baseline fetch failed' \
+  'gh-watch: linear: a team past the page limit fails the fetch' \
+  "$LIN_DIR" 'octocat/lin-limit' "$SEQ_LLIMIT" "$LIN_KEY"
+wassert 'gh-watch: linear: the page limit stopped the fetch at 20 pages' \
+  test "$(cat "$SEQ_LLIMIT.n")" = 21
+
+# A LINEAR FAILURE AFTER THE BASELINE DOES NOT DEAFEN GITHUB. Linear answers the
+# baseline, then fails for good; a GitHub PR arrives on the next poll. The
+# watcher fires on it, reports the last good Linear rows beside it, and says
+# once on stderr that Linear is failing.
+SEQ_LDOWN="$GH_TMP/seq-lin-down"
+printf '%s\n' "$LIN_BASE" FAIL >"$SEQ_LDOWN"
+SEQ_LDOWN_GH="$GH_TMP/seq-lin-down-gh"
+printf '%s\n' '' '9 2026-11-16T11:00:00Z' '9 2026-11-16T11:00:00Z' >"$SEQ_LDOWN_GH"
+run_lin 0 '9 2026-11-16T11:00:00Z' \
+  'gh-watch: linear: with Linear failing after the baseline, a GitHub change still fires' \
+  "$LIN_DIR" 'octocat/lin-down' "$SEQ_LDOWN" "$LIN_KEY" '' '' "$SEQ_LDOWN_GH"
+wassert 'gh-watch: linear: the fire keeps the last good Linear rows' \
+  bash -c "[[ \"\$1\" == *'IQONAI-28 Todo|alice|c1|2026-11-16T09:00:00.000Z bug'* ]]" _ "$LIN_OUT"
+wassert 'gh-watch: linear: the Linear failure is reported once, not once per fetch' \
+  test "$(printf '%s\n' "$LIN_OUT" | grep -c 'linear fetch for IQONAI/Devbox failed')" = 1
+wassert 'gh-watch: linear: the failure report does not hold the key' \
+  bash -c "[[ \"\$1\" != *\"\$2\"* ]]" _ "$LIN_OUT" "$LIN_KEY"
+
+# ...and a RECOVERY is reported once, and the same Linear rows coming back do
+# not fire: the rows kept during the failure are the rows that return.
+SEQ_LREC="$GH_TMP/seq-lin-recover"
+printf '%s\n' "$LIN_BASE" FAIL FAIL "$LIN_BASE" >"$SEQ_LREC"
+LREC_OUT="$GH_TMP/lin-recover.out"
+start_lin "$LIN_DIR" 'octocat/lin-recover' "$SEQ_LREC" '' "$LREC_OUT"
+LIVE_LREC="$REPLY"
+wassert 'gh-watch: linear: a watcher whose Linear fetch failed and recovered is still polling' \
+  await_calls "$SEQ_LREC" 7
+wassert 'gh-watch: linear: the recovered watcher still holds its pidfile' \
+  test "$(cat "$(watch_pidfile 'octocat/lin-recover')" 2>/dev/null)" = "$LIVE_LREC"
+wassert 'gh-watch: linear: two failed fetches in a row are one failure report' \
+  test "$(grep -c 'linear fetch for IQONAI/Devbox failed' "$LREC_OUT")" = 1
+wassert 'gh-watch: linear: the recovery is reported once' \
+  test "$(grep -c 'linear fetch for IQONAI/Devbox recovered' "$LREC_OUT")" = 1
 
 # Linear rows and GitHub rows are one snapshot: the PR side still fires.
 SEQ_LMIX="$GH_TMP/seq-lin-mix"
 printf '%s\n' "$LIN_BASE" >"$SEQ_LMIX"
 SEQ_LMIX_GH="$GH_TMP/seq-lin-mix-gh"
 printf '%s\n' '' '9 2026-11-16T11:00:00Z' '9 2026-11-16T11:00:00Z' >"$SEQ_LMIX_GH"
-run_lin 0 'IQONAI-28 Todo|alice|1|2026-11-16T09:00:00.000Z bug' \
+run_lin 0 'IQONAI-28 Todo|alice|c1|2026-11-16T09:00:00.000Z bug' \
   'gh-watch: linear: a GitHub change still fires, reported beside the Linear rows' \
   "$LIN_DIR" 'octocat/lin-mix' "$SEQ_LMIX" "$LIN_KEY" '' '' "$SEQ_LMIX_GH"
 
@@ -1344,7 +1423,7 @@ run_watch_in "$GH_WATCH_STATE_DIR" 1 'expects issue/PR numbers' \
 # A change confined to an ignored Linear identifier does not wake the watcher.
 SEQ_LIGN="$GH_TMP/seq-lin-ign"
 printf '%s\n' "$LIN_BASE" \
-  "$(lin_page "$(lin_issue IQONAI-28 Done alice bug 2026-11-16T09:00:00.000Z 2026-11-16T09:40:00.000Z)")" \
+  "$(lin_page "$(lin_issue IQONAI-28 Done alice bug c2 2026-11-16T09:40:00.000Z)")" \
   >"$SEQ_LIGN"
 start_lin "$LIN_DIR" 'octocat/lin-ign' "$SEQ_LIGN"
 LIVE_LIGN="$REPLY"
@@ -1380,7 +1459,7 @@ wassert 'gh-watch: linear: a stopped watcher removes its mode record with its pi
 
 # THE KEY. It reaches curl on stdin as `Authorization: <key>` (no Bearer), and
 # never in curl's argv, in the watcher's output, or in a state file.
-lin_change key "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug,p1 2026-11-16T09:00:00.000Z)")"
+lin_change key "$(lin_page "$(lin_issue IQONAI-28 Todo alice bug,p1 c1 2026-11-16T09:00:00.000Z)")"
 SEQ_LKEY="$REPLY"
 LKEY_ARGV="$GH_TMP/lin-key.argv"
 LKEY_STDIN="$GH_TMP/lin-key.stdin"
@@ -1396,6 +1475,8 @@ wassert 'gh-watch: linear: the header on stdin is Authorization: <key>, with no 
   grep -qx "Authorization: $LIN_KEY" "$LKEY_STDIN"
 wassert 'gh-watch: linear: the query filters on the team, the project and the open states' \
   bash -c "grep -qF '\"key\":{\"eq\":\"IQONAI\"}' '$LKEY_ARGV' && grep -qF '\"name\":{\"eq\":\"Devbox\"}' '$LKEY_ARGV' && grep -qF '\"nin\":[\"completed\",\"canceled\"]' '$LKEY_ARGV'"
+wassert 'gh-watch: linear: the query pages by cursor and reads the newest comment' \
+  bash -c "grep -qF 'pageInfo { hasNextPage endCursor }' '$LKEY_ARGV' && grep -qF 'orderBy: createdAt' '$LKEY_ARGV' && grep -qF 'comments(first: 1, orderBy: updatedAt) { nodes { id updatedAt } }' '$LKEY_ARGV'"
 wassert 'gh-watch: linear: the key is not in the watcher output' \
   bash -c "[[ \"\$1\" != *\"\$2\"* ]]" _ "$LIN_OUT" "$LIN_KEY"
 wassert 'gh-watch: linear: the key is not in any state file' \

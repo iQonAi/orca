@@ -43,9 +43,13 @@
 # file, or with tracker `github`, the watcher polls GitHub only. With tracker
 # `linear` it ALSO polls the open issues of `linear.team` (and of
 # `linear.project`, when set) through the Linear GraphQL API, and those rows
-# join the GitHub rows in one snapshot. Linear mode needs LINEAR_API_KEY in the
-# environment. The key goes to curl on stdin, so it never shows in argv, on
-# disk or in any output.
+# join the GitHub rows in one snapshot. Every open issue is read, page by page,
+# up to a page limit; past it the fetch fails. Linear mode needs LINEAR_API_KEY
+# in the environment. The key goes to curl on stdin, so it never shows in
+# argv, on disk or in any output. A failed Linear fetch on the baseline exits
+# 1; after the baseline the last good Linear rows stand in, GitHub is still
+# watched, and stderr gets one line when the failures start and one when they
+# stop.
 #
 # SINGLE-INSTANCE PER REPO. Idempotency is this script's OWN invariant,
 # not the caller's: it takes a per-repo pidfile before doing any work. Callers
@@ -536,10 +540,26 @@ fi
 #
 # In Linear mode the open Linear issues join the same snapshot (see
 # linear_snapshot below), so the confirm, the ignore set and the quiet expiry
-# treat a Linear row like any other. A failed Linear fetch fails the snapshot,
-# the same as a failed GitHub listing.
+# treat a Linear row like any other.
+#
+# The answer goes into $snap, not to stdout: the function runs in THIS shell,
+# never in `$(...)`, because it keeps state between polls (the last good
+# Linear rows, and whether Linear is failing).
+#
+# A FAILED LINEAR FETCH MUST NOT DEAFEN GITHUB. Before the baseline it fails
+# the snapshot, so a baseline without Linear exits 1 like any failed baseline.
+# After it, the last good Linear rows stand in for the missing ones and the
+# GitHub rows are compared as usual: a revoked key or a rate limit then costs
+# Linear detection only, not a PR review going unseen until the quiet expiry.
+# One stderr line marks the start of a failure episode and one its end, never
+# one per poll, and neither holds the key.
+linear_ok=""
+linear_last=""
+linear_failing=0
+linear_label="$linear_team${linear_project:+/$linear_project}"
 snapshot() {
   local issues prs linear=""
+  snap=""
   # stderr is dropped, as it was on the call this replaced: the exit status
   # already says "no answer", and a listing that is failing fails on every poll
   # — 110 copies of the same gh error in the output the orchestrator reads. A
@@ -551,27 +571,49 @@ snapshot() {
     --json number,updatedAt,labels \
     --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"' 2>/dev/null) || return 1
   if [ -n "$linear_team" ]; then
-    linear=$(linear_snapshot) || return 1
+    if linear=$(linear_snapshot); then
+      linear_ok=1
+      linear_last="$linear"
+      if [ "$linear_failing" = 1 ]; then
+        echo "linear fetch for $linear_label recovered" >&2
+        linear_failing=0
+      fi
+    else
+      [ -n "$linear_ok" ] || return 1
+      if [ "$linear_failing" != 1 ]; then
+        echo "linear fetch for $linear_label failed; keeping its last good rows and watching GitHub" >&2
+        linear_failing=1
+      fi
+      linear="$linear_last"
+    fi
   fi
-  {
+  snap="$({
     [ -n "$issues" ] && printf '%s\n' "$issues"
     [ -n "$prs" ] && printf '%s\n' "$prs"
     [ -n "$linear" ] && printf '%s\n' "$linear"
-  } | sort
+  } | sort)"
 }
 # The open issues of the Linear team (and project, when set) as rows of
 # `identifier fingerprint labels`, for example
-#   IQONAI-28 In_Progress|alice|2|2026-11-16T10:00:00.000Z bug,p1
-# The fingerprint is status|assignee|comment count|latest comment time, with
+#   IQONAI-28 In_Progress|alice|9c1e2f4a-0b7d-4c55-a2e1-3f6d8b9a1c00|2026-11-16T10:00:00.000Z bug,p1
+# The fingerprint is status|assignee|newest comment id|its updatedAt, with
 # whitespace turned into `_` so it stays one field; `-` stands for no assignee
 # or no comment. The issue's own updatedAt is left out: the fingerprint holds
 # the fields a wake-up is for, and nothing else.
 #
-# Open means any state type except completed and canceled. PAGE CAP: one page
-# of 50 issues, ordered by updatedAt, the same cap as the GitHub listings
-# above. A team with more open issues is watched on that page only. Each issue
-# also reads at most 50 labels and 50 comments, so past 50 comments the count
-# stops rising.
+# THE NEWEST COMMENT is read explicitly: `comments(first: 1, orderBy:
+# updatedAt)`. Linear's schema documents forward pagination (`first`) as newest
+# first, so that one node is the comment written or edited last, however many
+# comments the issue has. A new comment changes its id, an edit changes its
+# updatedAt, and a deleted newest comment hands the slot to the one before it.
+#
+# Open means any state type except completed and canceled. EVERY OPEN ISSUE is
+# read: the query pages through `pageInfo { hasNextPage endCursor }` with
+# `after`, 50 issues a page, ordered by createdAt so the cursor walks a stable
+# order while issues are edited. The row set therefore does not depend on the
+# sort order. PAGE LIMIT: $linear_page_limit pages. A team that still has a
+# next page after the last one is a FAILED fetch, never a silently shorter
+# row set. Each issue reads at most 50 labels.
 #
 # THE KEY NEVER LEAVES THIS PROCESS EXCEPT ON A PIPE. `printf` is a shell
 # builtin, so it runs with no argv of its own, and curl reads the header from
@@ -581,30 +623,53 @@ snapshot() {
 # the gh listings above.
 #
 # A GraphQL error comes back as HTTP 200 with an `errors` array, so success is
-# a response with no errors and an issue list, not just a zero exit from curl.
-# `--max-time` bounds a fetch that hangs, so a stalled connection is a failed
-# fetch and not a watcher that stops polling.
-# SC2016: `$filter` is a GraphQL variable, not a shell one.
+# a response with no errors, an issue list and a page info, not just a zero
+# exit from curl. `--max-time` bounds a fetch that hangs, so a stalled
+# connection is a failed fetch and not a watcher that stops polling.
+linear_page_limit=20
+# SC2016: `$filter` and `$after` are GraphQL variables, not shell ones.
 # shellcheck disable=SC2016
-linear_query='query($filter: IssueFilter) { issues(first: 50, orderBy: updatedAt, filter: $filter) { nodes { identifier state { name } assignee { displayName } labels(first: 50) { nodes { name } } comments(first: 50) { nodes { createdAt } } } } }'
+linear_query='query($filter: IssueFilter, $after: String) { issues(first: 50, after: $after, orderBy: createdAt, filter: $filter) { nodes { identifier state { name } assignee { displayName } labels(first: 50) { nodes { name } } comments(first: 1, orderBy: updatedAt) { nodes { id updatedAt } } } pageInfo { hasNextPage endCursor } } }'
 linear_snapshot() {
-  local body resp
-  body=$(jq -cn --arg q "$linear_query" --arg team "$linear_team" --arg project "$linear_project" '
-    {query: $q, variables: {filter: (
-      {team: {key: {eq: $team}}, state: {type: {nin: ["completed", "canceled"]}}}
-      + (if $project == "" then {} else {project: {name: {eq: $project}}} end))}}') || return 1
-  resp=$(printf 'Authorization: %s\n' "$LINEAR_API_KEY" |
-    curl -sSf --max-time 20 -H @- -H 'Content-Type: application/json' \
-      --data "$body" https://api.linear.app/graphql 2>/dev/null) || return 1
-  printf '%s' "$resp" | jq -r '
-    if (.errors | length) > 0 or (.data.issues.nodes | type) != "array" then error("no issue list")
-    else .data.issues.nodes[]
-      | ([(.state.name // "-"), (.assignee.displayName // "-"),
-          (.comments.nodes | length | tostring),
-          ([.comments.nodes[].createdAt] | max // "-")]
-          | map(gsub("\\s"; "_")) | join("|")) as $fp
-      | "\(.identifier) \($fp) \([.labels.nodes[].name] | sort | join(","))"
-    end' 2>/dev/null
+  local body resp page=0 after="" next page_rows rows=""
+  while :; do
+    page=$((page + 1))
+    [ "$page" -le "$linear_page_limit" ] || return 1
+    body=$(jq -cn --arg q "$linear_query" --arg team "$linear_team" --arg project "$linear_project" \
+      --arg after "$after" '
+      {query: $q, variables: {
+        after: (if $after == "" then null else $after end),
+        filter: (
+          {team: {key: {eq: $team}}, state: {type: {nin: ["completed", "canceled"]}}}
+          + (if $project == "" then {} else {project: {name: {eq: $project}}} end))}}') || return 1
+    resp=$(printf 'Authorization: %s\n' "$LINEAR_API_KEY" |
+      curl -sSf --max-time 20 -H @- -H 'Content-Type: application/json' \
+        --data "$body" https://api.linear.app/graphql 2>/dev/null) || return 1
+    # Line 1 is the next cursor, or empty on the last page; the rest are rows.
+    page_rows=$(printf '%s' "$resp" | jq -r '
+      if (.errors | length) > 0 or (.data.issues.nodes | type) != "array"
+        or (.data.issues.pageInfo.hasNextPage | type) != "boolean" then error("no issue page")
+      elif .data.issues.pageInfo.hasNextPage and ((.data.issues.pageInfo.endCursor // "") == "") then
+        error("a next page with no cursor")
+      else
+        (if .data.issues.pageInfo.hasNextPage then .data.issues.pageInfo.endCursor else "" end),
+        (.data.issues.nodes[]
+          | (.comments.nodes[0] // {}) as $c
+          | ([(.state.name // "-"), (.assignee.displayName // "-"),
+              ($c.id // "-"), ($c.updatedAt // "-")]
+              | map(gsub("\\s"; "_")) | join("|")) as $fp
+          | "\(.identifier) \($fp) \([.labels.nodes[].name] | sort | join(","))")
+      end' 2>/dev/null) || return 1
+    next="${page_rows%%$'\n'*}"
+    case "$page_rows" in
+      *$'\n'*) page_rows="${page_rows#*$'\n'}" ;;
+      *) page_rows="" ;;
+    esac
+    [ -n "$page_rows" ] && rows="${rows:+$rows$'\n'}$page_rows"
+    [ -n "$next" ] || break
+    after="$next"
+  done
+  printf '%s' "$rows"
 }
 # Seconds between a poll that differs from the baseline and the fetch that has
 # to differ from it too before the watcher exits. It is the whole cost of the
@@ -632,10 +697,11 @@ fi
 # A FAILED baseline is fatal; an EMPTY one is not. The watcher has nothing to
 # compare against if it never got an answer, but "" is a perfectly good baseline
 # for a repo with nothing open yet.
-base=$(snapshot) || {
+snapshot || {
   echo "baseline fetch failed for $repo"
   exit 1
 }
+base="$snap"
 # The set in force when the baseline was taken. It is half of the union below,
 # so it is read here rather than defaulted to empty: a watcher started while
 # numbers are already ignored must not treat its first poll as a release.
@@ -648,7 +714,8 @@ for _ in $(seq 1 110); do
   sleep_pid=""
   # Only a failed fetch is skipped. An empty answer is a real snapshot: it says
   # the repo has nothing open, which differs from a baseline that had something.
-  cur=$(snapshot) || continue
+  snapshot || continue
+  cur="$snap"
   # RE-READ THE SET EVERY POLL. Taking it once at startup would mean a restart
   # per change of ownership, and a restart is a re-invocation of the caller —
   # the very thing being removed.
@@ -683,7 +750,8 @@ for _ in $(seq 1 110); do
     # A FAILED confirming fetch confirmed nothing. Leave the baseline standing
     # and poll on: the next poll sees the same difference and confirms it then,
     # one poll late instead of wrong.
-    confirm=$(snapshot) || continue
+    snapshot || continue
+    confirm="$snap"
     # FILTERED TOO, with the SAME set the poll used. This is the easiest place
     # to leave the ignore set out, and the most expensive: the confirm is taken
     # seconds after a differing poll, which is exactly when the caller's own
