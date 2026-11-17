@@ -221,8 +221,8 @@ On GitHub:
     numbers share one set, and on a Linear project Linear identifiers go in
     it too (`--ignore "53 IQONAI-28"`). Write the FULL set every time: it
     REPLACES the previous one, and `--ignore ""` clears it. Update it when a worker's PR
-    opens (add the PR number beside its issue), when the PR waits for approval
-    (take the PR number out, see step 8) and at teardown after the merge.
+    opens (add the PR number beside its issue), when the PR waits for a
+    human (take the issue and PR numbers out, see step 8) and at teardown.
     Never restart the watcher to change the set — it re-reads the set on every
     poll, and the restart would itself be the re-invocation this exists to
     remove.
@@ -301,18 +301,24 @@ The tracker commands are in the table under Epics and tasks.
    approval, and orca cannot approve its own PR. Once CI passes, every
    thread is resolved, none is critical and no gate below applies, run
    `gh pr merge <n> --auto --squash`. List the PR in the digest as waiting
-   for the user's approval. GitHub merges it when the user approves. Take
-   the PR number out of the ignore set, so the approval and the merge wake
-   you for teardown. A later push, for example a late review fix, leaves
-   auto-merge on; the user approves again. **Auto-merge not allowed:** if
-   the repo does not allow auto-merge, the `gh` command fails. Report that
-   in the digest under Blocked, and list the PR as waiting for the user's
-   approval and merge. **on-hold gate:** if the PR or its issue carries an
-   `on-hold` label, DO NOT turn on auto-merge or dispatch — wait for label
-   removal or an explicit bot-handle sign-off comment. If auto-merge is
-   already on, turn it off: `gh pr merge <n> --disable-auto`. **HITL
-   gate:** never turn on auto-merge for the PR of a `HITL` task; the human
-   merges it. List it in the digest as waiting for a human.
+   for the user's approval. GitHub merges it when the user approves. If the
+   PR is already mergeable, `gh` merges it at once; go straight to teardown.
+   **gh errors:** if `gh pr merge --auto` fails, report the error text from
+   `gh` in the digest under Blocked. List the PR as waiting for the user to
+   approve and merge. **Waiting for a human:** while a PR waits for a human
+   (auto-merge on, a `gh` error, or `HITL`), take both the issue and the PR
+   number out of the ignore set. You make no more changes on either one
+   during the wait, so the approval, the merge and any `on-hold` label wake
+   you. **Late changes:** before you push to a PR with auto-merge on, or
+   when a new review thread appears on it, run
+   `gh pr merge <n> --disable-auto`. The PR no longer waits, so put both
+   numbers back in the ignore set. Turn auto-merge on again only after
+   every gate passes again. **on-hold gate:** if the PR or its issue
+   carries an `on-hold` label, DO NOT turn on auto-merge or dispatch — wait
+   for label removal or an explicit bot-handle sign-off comment. If
+   auto-merge is already on, turn it off: `gh pr merge <n> --disable-auto`.
+   **HITL gate:** never turn on auto-merge for the PR of a `HITL` task; the
+   human merges it. List it in the digest as waiting for a human.
 9. Teardown: EXIT worktree before `git worktree remove`; delete branch local
    - origin; release claims; board row → done; rewrite the ignore set without
    the merged issue and PR, so anything that happens on them wakes you again.

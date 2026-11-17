@@ -459,7 +459,9 @@ The blind spot is deliberate and worth knowing: an external comment, an
 the watcher either. Nothing in the snapshot can tell those from orca's own
 work, since both act as the same login. Orca compensates with its own poll
 cadence — 60s while comments are flowing — and re-reads its own PRs before
-merging them.
+it turns on auto-merge. While a PR waits for a human, orca takes the PR and
+its issue out of the ignore set, so the approval, the merge and any `on-hold`
+label wake it.
 
 ## Safety and blast radius
 
@@ -570,7 +572,7 @@ at prose, not at code that enforces it.
 | Push the worker branch                                           | `agents/orca.md:285`                                             | write repo contents      |
 | Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:285`, `agents/orca.md:295-299`                   | write pull requests      |
 | Request an external reviewer                                     | `agents/orca.md:291` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
-| Turn on auto-merge for the PR, or turn it off                    | `agents/orca.md:303`, `agents/orca.md:313`                       | write contents and PRs   |
+| Turn on auto-merge for the PR, or turn it off                    | `agents/orca.md:303`, `agents/orca.md:314`                       | write contents and PRs   |
 
 Net, for the bot's fine-grained token: Metadata: read, Issues: read/write,
 Contents: read/write, Pull requests: read/write — plus Workflows: write if a
@@ -644,7 +646,7 @@ of open issues against the key's Linear rate limit.
 
 ### What gates a merge
 
-The worker lifecycle in `agents/orca.md:289-315` specifies:
+The worker lifecycle in `agents/orca.md:289-321` specifies:
 
 1. An internal review agent is spawned for every PR, checking issue completion,
    security, maintainability, and bugs. Its findings are posted as PR review
@@ -659,10 +661,12 @@ The worker lifecycle in `agents/orca.md:289-315` specifies:
    human approval and orca cannot approve its own PR. Once CI passes, every
    thread is resolved **and none is critical**, orca runs
    `gh pr merge <n> --auto --squash` and asks you to review. GitHub merges
-   the PR when you approve. A later push leaves auto-merge on, and you
-   approve again. The repo needs "Allow auto-merge" turned on. Without it
-   the `gh` command fails, orca reports that under Blocked, and you approve
-   and merge the PR yourself.
+   the PR when you approve. If the PR is already mergeable, `gh` merges it
+   at once. Before orca pushes to the PR, or when a new review thread
+   appears, orca turns auto-merge off. It turns it on again only after every
+   gate passes again. The repo needs "Allow auto-merge" turned on. If the
+   `gh` command fails for any reason, orca reports the error under Blocked,
+   and you approve and merge the PR yourself.
 6. **`on-hold` gate:** an `on-hold` label on the PR or its issue blocks
    auto-merge and dispatch until the label is removed or a bot-handle comment
    signs off. If auto-merge is already on, orca turns it off with
@@ -671,7 +675,7 @@ The worker lifecycle in `agents/orca.md:289-315` specifies:
    without asking (`agents/orca.md:270-273`).
 8. **`HITL` gate:** orca never turns on auto-merge for the PR of a task
    labelled `HITL`. The human merges it, and orca lists the PR in the digest
-   as waiting for a human (`agents/orca.md:314-315`).
+   as waiting for a human (`agents/orca.md:320-321`).
 
 **These gates are prompt instructions, not enforced code.** The executable
 files in this repo are the watcher, the SessionStart hook, the installer, and
@@ -685,7 +689,7 @@ as well as the model follows its playbook.
   GitHub's own enforcement applies to it as to any other client — but that has
   not been tested here. The playbook assumes a rule that needs a human
   approval and merges through auto-merge for that reason
-  (`agents/orca.md:300-315`). The playbook does say never to commit or merge local `main`
+  (`agents/orca.md:300-321`). The playbook does say never to commit or merge local `main`
   (`agents/orca.md:285-286`); work always goes through a branch and a PR.
 - **There is no dry-run or approval mode.** No flag, environment variable, or
   setting in this repo makes orca plan without acting, or ask before it
