@@ -41,6 +41,9 @@ the rest and reports a digest each cycle.
 - `jq`
 - bash, git
 - a GitHub account for the bot, with write access to the repos orca manages
+- "Allow auto-merge" turned on in each repo orca manages (Settings, General,
+  Pull Requests). Orca merges through auto-merge, so you approve and GitHub
+  merges (see [What gates a merge](#what-gates-a-merge))
 - for a Linear project: the Linear MCP server, connected as a dedicated bot
   Linear user that is a member of the project's Linear team. Setting up that
   user is up to you; orca names the account it finds in its first digest.
@@ -509,9 +512,9 @@ On your machine:
 - Runs `gh-watch.sh` as a long-lived background job polling GitHub every 30s,
   and Linear too on a Linear project (`scripts/gh-watch.sh`).
 - Creates git worktrees and branches under `.claude/worktrees/`, and writes
-  scratch state under `.claude/scratch/` (`agents/orca.md:273-278`).
+  scratch state under `.claude/scratch/` (`agents/orca.md:274-279`).
 - Dispatches subagent workers that edit files and run the project's
-  `build | lint | typecheck | test` commands (`agents/orca.md:282-283`).
+  `build | lint | typecheck | test` commands (`agents/orca.md:283-284`).
 - **Claude-style install only:** `install.sh` symlinks (or copies) the agent,
   hook, and watcher into `~/.claude/` and adds a `SessionStart` hook to
   `~/.claude/settings.json` (`install.sh:78-114`). That is a global change, not
@@ -563,11 +566,11 @@ at prose, not at code that enforces it.
 | Poll open issues and PRs every 30s — number, `updatedAt`, labels only | `scripts/gh-watch.sh:567` — `gh issue list`, `gh pr list`    | read issues and PRs      |
 | Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:123` — `gh repo view`, when no repo is given; `agents/orca.md:52` reads it with `orca-project.sh github.repo`, which makes no API call | read repo metadata       |
 | Read issue assignees and recent comments each cycle              | `agents/orca.md:166-167`                                           | read issues              |
-| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:269-272`                                         | write issues             |
-| Push the worker branch                                           | `agents/orca.md:284`                                             | write repo contents      |
-| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:284`, `agents/orca.md:294-298`                   | write pull requests      |
-| Request an external reviewer                                     | `agents/orca.md:290` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
-| Merge the PR                                                     | `agents/orca.md:299`                                             | write contents and PRs   |
+| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:270-273`                                         | write issues             |
+| Push the worker branch                                           | `agents/orca.md:285`                                             | write repo contents      |
+| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:285`, `agents/orca.md:295-299`                   | write pull requests      |
+| Request an external reviewer                                     | `agents/orca.md:291` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
+| Turn on auto-merge for the PR, or turn it off                    | `agents/orca.md:303`, `agents/orca.md:313`                       | write contents and PRs   |
 
 Net, for the bot's fine-grained token: Metadata: read, Issues: read/write,
 Contents: read/write, Pull requests: read/write — plus Workflows: write if a
@@ -641,7 +644,7 @@ of open issues against the key's Linear rate limit.
 
 ### What gates a merge
 
-The worker lifecycle in `agents/orca.md:288-303` specifies:
+The worker lifecycle in `agents/orca.md:289-315` specifies:
 
 1. An internal review agent is spawned for every PR, checking issue completion,
    security, maintainability, and bugs. Its findings are posted as PR review
@@ -652,13 +655,23 @@ The worker lifecycle in `agents/orca.md:288-303` specifies:
 4. Every thread must be addressed — fixed, then replied to with the fix and its
    commit hash; or replied to with a justification. Silent resolution is
    forbidden.
-5. Merge happens only once every thread is addressed **and none is critical**.
-6. **`on-hold` gate:** an `on-hold` label on the PR or its issue blocks merge
-   and dispatch until the label is removed or a bot-handle comment signs off.
+5. Orca merges through GitHub auto-merge, because branch protection needs a
+   human approval and orca cannot approve its own PR. Once CI passes, every
+   thread is resolved **and none is critical**, orca runs
+   `gh pr merge <n> --auto --squash` and asks you to review. GitHub merges
+   the PR when you approve. A later push leaves auto-merge on, and you
+   approve again. The repo needs "Allow auto-merge" turned on. Without it
+   the `gh` command fails, orca reports that under Blocked, and you approve
+   and merge the PR yourself.
+6. **`on-hold` gate:** an `on-hold` label on the PR or its issue blocks
+   auto-merge and dispatch until the label is removed or a bot-handle comment
+   signs off. If auto-merge is already on, orca turns it off with
+   `gh pr merge <n> --disable-auto`.
 7. On issues, a `needs-info` label means wait; `ready-for-agent` means dispatch
-   without asking (`agents/orca.md:269-272`).
-8. **`HITL` gate:** orca never merges the PR of a task labelled `HITL`; it
-   lists the PR in the digest as waiting for a human (`agents/orca.md:302-303`).
+   without asking (`agents/orca.md:270-273`).
+8. **`HITL` gate:** orca never turns on auto-merge for the PR of a task
+   labelled `HITL`. The human merges it, and orca lists the PR in the digest
+   as waiting for a human (`agents/orca.md:314-315`).
 
 **These gates are prompt instructions, not enforced code.** The executable
 files in this repo are the watcher, the SessionStart hook, the installer, and
@@ -670,9 +683,10 @@ as well as the model follows its playbook.
 - **Branch protection is unverified.** Nothing in this repo reads, respects, or
   handles branch protection rules. Orca merges with ordinary `gh` calls, so
   GitHub's own enforcement applies to it as to any other client — but that has
-  not been tested here, and the playbook defines no handling for a merge GitHub
-  rejects. The playbook does say never to commit or merge local `main`
-  (`agents/orca.md:284-285`); work always goes through a branch and a PR.
+  not been tested here. The playbook assumes a rule that needs a human
+  approval and merges through auto-merge for that reason
+  (`agents/orca.md:300-315`). The playbook does say never to commit or merge local `main`
+  (`agents/orca.md:285-286`); work always goes through a branch and a PR.
 - **There is no dry-run or approval mode.** No flag, environment variable, or
   setting in this repo makes orca plan without acting, or ask before it
   comments, pushes, or merges. Once running, it acts on its own.
