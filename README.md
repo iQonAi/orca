@@ -560,8 +560,8 @@ at prose, not at code that enforces it.
 | ---------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------ |
 | Verify the token and read the bot's login and id                 | `bin/orca` — `gh api user`                                       | read user profile        |
 | Read the bot's permission on the repository                      | `bin/orca` — `gh api repos/<repo>/collaborators/<login>/permission` | read repo metadata    |
-| Poll open issues and PRs every 30s — number, `updatedAt`, labels only | `scripts/gh-watch.sh:547` — `gh issue list`, `gh pr list`    | read issues and PRs      |
-| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:119` — `gh repo view`, when no repo is given; `agents/orca.md:52` reads it with `orca-project.sh github.repo`, which makes no API call | read repo metadata       |
+| Poll open issues and PRs every 30s — number, `updatedAt`, labels only | `scripts/gh-watch.sh:567` — `gh issue list`, `gh pr list`    | read issues and PRs      |
+| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:123` — `gh repo view`, when no repo is given; `agents/orca.md:52` reads it with `orca-project.sh github.repo`, which makes no API call | read repo metadata       |
 | Read issue assignees and recent comments each cycle              | `agents/orca.md:166-167`                                           | read issues              |
 | Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:269-272`                                         | write issues             |
 | Push the worker branch                                           | `agents/orca.md:284`                                             | write repo contents      |
@@ -605,31 +605,39 @@ every 30s), counting against the bot token's GraphQL rate limit.
 The watcher reads the tracker from `.orca/project.json` in its working
 directory, through `orca-project.sh`; its command line is the same for both
 trackers. Without the file, or with `tracker` set to `github`, it polls
-GitHub only. With `linear`, each poll also sends one GraphQL query to
+GitHub only. With `linear`, each poll also queries
 `https://api.linear.app/graphql` for the open issues of `linear.team`, and of
 `linear.project` when it is set. Open means any state except completed and
 canceled. Each issue gives one row beside the GitHub rows:
 
 ```
-IQONAI-28 In_Progress|alice|2|2026-11-16T10:00:00.000Z bug,p1
+IQONAI-28 In_Progress|alice|9c1e2f4a-0b7d-4c55-a2e1-3f6d8b9a1c00|2026-11-16T10:00:00.000Z bug,p1
 ```
 
-That is the identifier, then the status, assignee, comment count and latest
-comment time (`-` for none, whitespace as `_`), then the labels. The rows
-join one snapshot, so the confirm, the ignore set and the ~55min expiry work
-on them as on GitHub rows. A failed Linear fetch counts as a failed fetch:
-on the baseline the watcher exits 1; on a later poll it skips the poll.
+That is the identifier, then the status, the assignee, and the id and
+`updatedAt` of the newest comment (`-` for none, whitespace as `_`), then the
+labels. The query asks for the newest comment explicitly, so a new or edited
+comment changes the row however many comments the issue has. The rows join
+one snapshot, so the confirm, the ignore set and the ~55min expiry work on
+them as on GitHub rows.
 
-The query reads one page of 50 issues, ordered by `updatedAt`, the same cap as
-the GitHub listings, and at most 50 labels and 50 comments per issue. On a
-team with more open issues, the issues past that page are not watched.
+The query reads every open issue. It pages through the results 50 at a time,
+ordered by creation, up to 20 pages (1,000 issues), and at most 50 labels per
+issue. A team with more open issues than that fails the fetch; the watcher
+never watches a silently shorter list.
+
+A failed Linear fetch on the baseline exits 1, as a failed GitHub listing
+does. After the baseline, a failed Linear fetch keeps the last good Linear
+rows and still compares the GitHub rows, so a revoked key or a rate limit
+does not hide GitHub changes. The watcher prints one line on stderr when the
+Linear failures start and one when they recover.
 
 Linear mode needs a Linear personal API key in `LINEAR_API_KEY`; without it
 the watcher exits 1. curl reads the `Authorization` header on stdin, so the
 key never shows in the process list, on disk or in the watcher's output.
 `gh-watch.sh --status` prints `linear: <team>[/<project>]` when the live
-watcher polls Linear. Linear mode adds about 120 requests per hour against
-the key's Linear rate limit.
+watcher polls Linear. Linear mode adds about 120 requests per hour per page
+of open issues against the key's Linear rate limit.
 
 ### What gates a merge
 
