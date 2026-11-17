@@ -27,7 +27,7 @@ the rest and reports a digest each cycle.
 | Path                          | What it is                                                                 |
 | ----------------------------- | -------------------------------------------------------------------------- |
 | `agents/orca.md`              | The orchestrator playbook — a Claude Code agent definition.                 |
-| `scripts/gh-watch.sh`         | Polls a repo's open issues and PRs every 30s (`gh issue list` plus `gh pr list`); exits on any change that a second fetch confirms. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection, ~35s on the poll that sees the change. Enforces one watcher per repo via a pidfile, with `--status`, `--takeover` and `--ignore` modes; `--ignore` records the issue/PR numbers orca currently owns, so its own workers' pushes and comments do not wake it. |
+| `scripts/gh-watch.sh`         | Polls a repo's open issues and PRs every 30s (`gh issue list` plus `gh pr list`); exits on any change that a second fetch confirms. Its exit re-invokes orca as a harness task-notification, giving ~30s change detection, ~35s on the poll that sees the change. On a project whose tracker is Linear, it also polls the team's open Linear issues. Enforces one watcher per repo via a pidfile, with `--status`, `--takeover` and `--ignore` modes; `--ignore` records the issue/PR numbers and Linear identifiers orca currently owns, so its own workers' pushes and comments do not wake it. |
 | `hooks/orca-start-watcher.sh` | SessionStart hook. When the session is orca, it injects a directive telling orca to launch the watcher for the repo resolved from the git remote. No network calls; always exits 0. |
 | `scripts/orca-project.sh`     | Reads one field of the project data file, `.orca/project.json`, and prints it. With no file it answers the defaults (GitHub tracker, repo from the git remote); a broken file is an error, never a default. See [Project data](#project-data). |
 | `bin/orca`                    | The launcher, and how a session is started. Runs the preflight checks — tools on `PATH`, the bot's token file and the login it authenticates, the bot's write access on the repository, the installed files and hook wiring, no second orca on the repository — then exports `GH_TOKEN` and the bot's git identity and execs `claude --agent orca`. `orca --check` runs the checks alone; `orca init` writes the project data file and opens a PR with it. |
@@ -43,7 +43,9 @@ the rest and reports a digest each cycle.
 - a GitHub account for the bot, with write access to the repos orca manages
 - for a Linear project: the Linear MCP server, connected as a dedicated bot
   Linear user that is a member of the project's Linear team. Setting up that
-  user is up to you; orca names the account it finds in its first digest
+  user is up to you; orca names the account it finds in its first digest.
+  The watcher also needs a Linear personal API key in `LINEAR_API_KEY` (see
+  [Linear polling](#linear-polling))
 
 ## Install
 
@@ -108,6 +110,7 @@ Environment overrides:
 | `ORCA_TOKEN_FILE` | `~/.config/orca/token` | (launcher) the bot's token file; `~/.config` follows `XDG_CONFIG_HOME` |
 | `ORCA_GIT_NAME` | the bot's login      | (launcher) git author and committer name orca commits with |
 | `ORCA_GIT_EMAIL` | `<id>+<login>@users.noreply.github.com` | (launcher) git author and committer email orca commits with |
+| `LINEAR_API_KEY` | unset             | (watcher) a Linear personal API key; required when `.orca/project.json` names the `linear` tracker, unused otherwise |
 | `GH_WATCH_CONFIRM_DELAY` | `5`         | (watcher) seconds between a poll that differs from the baseline and the fetch that has to differ from it too before the watcher exits. Anything that is not a positive integer is reported on stderr and replaced by the default |
 
 Re-runs are idempotent. Anything replaced is backed up to
@@ -343,9 +346,9 @@ issue. Assignment counts only when the account is a dedicated bot user. A
 comment that mentions orca is an instruction only when a member of the
 Linear team named in `.orca/project.json` wrote it; see
 [Issue and PR comments are an instruction channel](#issue-and-pr-comments-are-an-instruction-channel).
-The watcher polls GitHub only, so a change on Linear does not wake orca
-yet. Orca reads recently updated Linear issues and their comments on each
-poll, and polls at least every 600s or so.
+The watcher polls the team's open Linear issues beside GitHub, so a change
+on Linear wakes orca the same way; see [Linear polling](#linear-polling).
+Orca then reads the recently updated Linear issues and their comments.
 
 Signals orca reacts to on GitHub:
 
@@ -424,7 +427,7 @@ the launcher exported, so that PR is opened as the bot.
 | Exit | Meaning                                                                     |
 | ---- | --------------------------------------------------------------------------- |
 | 0    | Change detected, ~55min quiet expiry, or stopped by a signal — restart it. In `--status` mode: no watcher holds this repo. In `--ignore` mode: the set was written. |
-| 1    | Could not start (no repo, unusable state dir, baseline fetch failed), or `--ignore` was given something that is not a list of numbers — fix the cause. |
+| 1    | Could not start (no repo, unusable state dir, baseline fetch failed, `.orca/project.json` rejected by the reader, Linear tracker without `LINEAR_API_KEY`), or `--ignore` was given something that is not a list of numbers and Linear identifiers — fix the cause. |
 | 3    | A watcher already holds this repo. In `--status` mode its pid is printed. `--takeover` replaces an incumbent that is not yours. |
 
 ### The ignore set
@@ -436,7 +439,9 @@ orca is re-invoked to be told about work it just did itself.
 currently owns: it writes them beside the pidfile and exits 0 without launching
 anything, and a change confined to those numbers is no longer a wake-up. Issue
 and PR numbers are one namespace, because an owner owns an issue and its PR
-together. `--ignore ""` clears the set, and `--status` reports it.
+together. On a Linear project, Linear identifiers go in the same set:
+`--ignore "53 54 IQONAI-28"`. `--ignore ""` clears the set, and `--status`
+reports it.
 
 The set is re-read on **every poll**, so it moves without restarting the
 watcher — which matters, because a restart is itself the re-invocation the
@@ -464,11 +469,11 @@ anything.
 `agents/orca.md` defines two signals: an issue **assigned to the bot handle**
 is dispatchable work, and **any `@bot-handle` mention** in an issue or PR
 comment is "a message TO this orchestrator session; read it and dispatch/act
-accordingly" (`agents/orca.md:161-168`).
+accordingly" (`agents/orca.md:163-170`).
 
 The playbook tells orca to ignore its own comments and to act only on
 instructions from accounts with write access or better, surfacing the rest in
-the digest (`agents/orca.md:169-176`). That is a prompt instruction, not
+the digest (`agents/orca.md:171-178`). That is a prompt instruction, not
 enforced code: no script in this repo checks the author, so treat it as a
 mitigation, not a boundary. On a public repo, every drive-by commenter is
 still addressing an agent that can run commands on your machine and merge to
@@ -501,12 +506,12 @@ would otherwise look like work for orca.
 
 On your machine:
 
-- Runs `gh-watch.sh` as a long-lived background job polling GitHub every 30s
-  (`scripts/gh-watch.sh`).
+- Runs `gh-watch.sh` as a long-lived background job polling GitHub every 30s,
+  and Linear too on a Linear project (`scripts/gh-watch.sh`).
 - Creates git worktrees and branches under `.claude/worktrees/`, and writes
-  scratch state under `.claude/scratch/` (`agents/orca.md:268-273`).
+  scratch state under `.claude/scratch/` (`agents/orca.md:273-278`).
 - Dispatches subagent workers that edit files and run the project's
-  `build | lint | typecheck | test` commands (`agents/orca.md:277-278`).
+  `build | lint | typecheck | test` commands (`agents/orca.md:282-283`).
 - **Claude-style install only:** `install.sh` symlinks (or copies) the agent,
   hook, and watcher into `~/.claude/` and adds a `SessionStart` hook to
   `~/.claude/settings.json` (`install.sh:78-114`). That is a global change, not
@@ -555,14 +560,14 @@ at prose, not at code that enforces it.
 | ---------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------ |
 | Verify the token and read the bot's login and id                 | `bin/orca` — `gh api user`                                       | read user profile        |
 | Read the bot's permission on the repository                      | `bin/orca` — `gh api repos/<repo>/collaborators/<login>/permission` | read repo metadata    |
-| Poll open issues and PRs every 30s — number, `updatedAt`, labels only | `scripts/gh-watch.sh:378` — `gh issue list`, `gh pr list`    | read issues and PRs      |
-| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:104` — `gh repo view`, when no repo is given; `agents/orca.md:52` reads it with `orca-project.sh github.repo`, which makes no API call | read repo metadata       |
-| Read issue assignees and recent comments each cycle              | `agents/orca.md:164-165`                                           | read issues              |
-| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:264-267`                                         | write issues             |
-| Push the worker branch                                           | `agents/orca.md:279`                                             | write repo contents      |
-| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:279`, `agents/orca.md:289-293`                   | write pull requests      |
-| Request an external reviewer                                     | `agents/orca.md:285` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
-| Merge the PR                                                     | `agents/orca.md:294`                                             | write contents and PRs   |
+| Poll open issues and PRs every 30s — number, `updatedAt`, labels only | `scripts/gh-watch.sh:567` — `gh issue list`, `gh pr list`    | read issues and PRs      |
+| Resolve `<owner>/<repo>` from the cwd                            | `scripts/gh-watch.sh:123` — `gh repo view`, when no repo is given; `agents/orca.md:52` reads it with `orca-project.sh github.repo`, which makes no API call | read repo metadata       |
+| Read issue assignees and recent comments each cycle              | `agents/orca.md:166-167`                                           | read issues              |
+| Comment the plan on an issue; set priority and workflow labels   | `agents/orca.md:269-272`                                         | write issues             |
+| Push the worker branch                                           | `agents/orca.md:284`                                             | write repo contents      |
+| Open the PR, post review comments, reply to and resolve threads  | `agents/orca.md:284`, `agents/orca.md:294-298`                   | write pull requests      |
+| Request an external reviewer                                     | `agents/orca.md:290` — `gh api -X POST .../requested_reviewers`  | write pull requests      |
+| Merge the PR                                                     | `agents/orca.md:299`                                             | write contents and PRs   |
 
 Net, for the bot's fine-grained token: Metadata: read, Issues: read/write,
 Contents: read/write, Pull requests: read/write — plus Workflows: write if a
@@ -595,9 +600,48 @@ answer differs from the baseline as well.
 The watcher makes roughly 240 requests per hour per repo (two per poll, one poll
 every 30s), counting against the bot token's GraphQL rate limit.
 
+### Linear polling
+
+The watcher reads the tracker from `.orca/project.json` in its working
+directory, through `orca-project.sh`; its command line is the same for both
+trackers. Without the file, or with `tracker` set to `github`, it polls
+GitHub only. With `linear`, each poll also queries
+`https://api.linear.app/graphql` for the open issues of `linear.team`, and of
+`linear.project` when it is set. Open means any state except completed and
+canceled. Each issue gives one row beside the GitHub rows:
+
+```
+IQONAI-28 In_Progress|alice|9c1e2f4a-0b7d-4c55-a2e1-3f6d8b9a1c00|2026-11-16T10:00:00.000Z bug,p1
+```
+
+That is the identifier, then the status, the assignee, and the id and
+`updatedAt` of the newest comment (`-` for none, whitespace as `_`), then the
+labels. The query asks for the newest comment explicitly, so a new or edited
+comment changes the row however many comments the issue has. The rows join
+one snapshot, so the confirm, the ignore set and the ~55min expiry work on
+them as on GitHub rows.
+
+The query reads every open issue. It pages through the results 50 at a time,
+ordered by creation, up to 20 pages (1,000 issues), and at most 50 labels per
+issue. A team with more open issues than that fails the fetch; the watcher
+never watches a silently shorter list.
+
+A failed Linear fetch on the baseline exits 1, as a failed GitHub listing
+does. After the baseline, a failed Linear fetch keeps the last good Linear
+rows and still compares the GitHub rows, so a revoked key or a rate limit
+does not hide GitHub changes. The watcher prints one line on stderr when the
+Linear failures start and one when they recover.
+
+Linear mode needs a Linear personal API key in `LINEAR_API_KEY`; without it
+the watcher exits 1. curl reads the `Authorization` header on stdin, so the
+key never shows in the process list, on disk or in the watcher's output.
+`gh-watch.sh --status` prints `linear: <team>[/<project>]` when the live
+watcher polls Linear. Linear mode adds about 120 requests per hour per page
+of open issues against the key's Linear rate limit.
+
 ### What gates a merge
 
-The worker lifecycle in `agents/orca.md:283-298` specifies:
+The worker lifecycle in `agents/orca.md:288-303` specifies:
 
 1. An internal review agent is spawned for every PR, checking issue completion,
    security, maintainability, and bugs. Its findings are posted as PR review
@@ -612,9 +656,9 @@ The worker lifecycle in `agents/orca.md:283-298` specifies:
 6. **`on-hold` gate:** an `on-hold` label on the PR or its issue blocks merge
    and dispatch until the label is removed or a bot-handle comment signs off.
 7. On issues, a `needs-info` label means wait; `ready-for-agent` means dispatch
-   without asking (`agents/orca.md:264-267`).
+   without asking (`agents/orca.md:269-272`).
 8. **`HITL` gate:** orca never merges the PR of a task labelled `HITL`; it
-   lists the PR in the digest as waiting for a human (`agents/orca.md:297-298`).
+   lists the PR in the digest as waiting for a human (`agents/orca.md:302-303`).
 
 **These gates are prompt instructions, not enforced code.** The executable
 files in this repo are the watcher, the SessionStart hook, the installer, and
@@ -628,13 +672,13 @@ as well as the model follows its playbook.
   GitHub's own enforcement applies to it as to any other client — but that has
   not been tested here, and the playbook defines no handling for a merge GitHub
   rejects. The playbook does say never to commit or merge local `main`
-  (`agents/orca.md:279-280`); work always goes through a branch and a PR.
+  (`agents/orca.md:284-285`); work always goes through a branch and a PR.
 - **There is no dry-run or approval mode.** No flag, environment variable, or
   setting in this repo makes orca plan without acting, or ask before it
   comments, pushes, or merges. Once running, it acts on its own.
 - **Token cost per cycle is unmeasured.** Every watcher exit re-invokes the
   model, and the poll cadence adapts between 60s and ~1800s depending on
-  activity (`agents/orca.md:185-189`), so cost scales with how busy the repo is.
+  activity (`agents/orca.md:187-190`), so cost scales with how busy the repo is.
   No measured figure is available; tracked in
   [#23](https://github.com/iQonAi/orca/issues/23).
 - **The `agents` install style is untested.** Orca has never been run under a
@@ -647,8 +691,8 @@ as well as the model follows its playbook.
 bash test/run.sh
 ```
 
-The suite is hermetic: a stub `gh` (and a stub `claude`, for the launcher)
-replaces the network, temp HOMEs stand in for `~`, and `GH_WATCH_STATE_DIR`
+The suite is hermetic: a stub `gh` (a stub `curl` for the Linear API, and a
+stub `claude` for the launcher) replaces the network, temp HOMEs stand in for `~`, and `GH_WATCH_STATE_DIR`
 redirects pidfiles to a temp dir, so a real watcher on the machine is neither
 seen nor disturbed.
 

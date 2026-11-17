@@ -10,7 +10,8 @@
 #   No repo argument: repo auto-detected from cwd via `gh repo view`.
 #   --status    report whether a live watcher holds this repo, then exit.
 #               Never launches, never writes state — safe to call every cycle.
-#               Also reports the ignore set, when the repo has one.
+#               Also reports `linear: <team>[/<project>]` when the live watcher
+#               polls Linear, and the ignore set, when the repo has one.
 #   --takeover  terminate the live watcher holding this repo (if any), then
 #               become the watcher in its place. For an incumbent that is not
 #               the caller's own job: its exit notifies whoever launched it,
@@ -23,6 +24,8 @@
 #               re-invoke it to report work it did itself. `--ignore ""`
 #               clears the set. The numbers are ONE namespace over issues and
 #               PRs, because an owner owns an issue and its PR together.
+#               Linear identifiers go in the same set beside the numbers, for
+#               example `--ignore "53 54 IQONAI-28"`.
 #               The set is re-read on EVERY poll, so it changes without
 #               restarting the watcher — and a restart is itself the
 #               re-invocation this exists to remove. A live watcher is not
@@ -34,6 +37,19 @@
 #               caller's own work — same token, same actor — so the caller
 #               compensates: poll faster while comments flow, and re-read your
 #               own PRs before merging them.
+#
+# LINEAR. The tracker comes from .orca/project.json at the git root of the
+# working directory, read through orca-project.sh, never from a flag. With no
+# file, or with tracker `github`, the watcher polls GitHub only. With tracker
+# `linear` it ALSO polls the open issues of `linear.team` (and of
+# `linear.project`, when set) through the Linear GraphQL API, and those rows
+# join the GitHub rows in one snapshot. Every open issue is read, page by page,
+# up to a page limit; past it the fetch fails. Linear mode needs LINEAR_API_KEY
+# in the environment. The key goes to curl on stdin, so it never shows in
+# argv, on disk or in any output. A failed Linear fetch on the baseline exits
+# 1; after the baseline the last good Linear rows stand in, GitHub is still
+# watched, and stderr gets one line when the failures start and one when they
+# stop.
 #
 # SINGLE-INSTANCE PER REPO. Idempotency is this script's OWN invariant,
 # not the caller's: it takes a per-repo pidfile before doing any work. Callers
@@ -48,8 +64,10 @@
 #      holds this repo. --ignore: the set was written. In every case except
 #      --ignore: the caller SHOULD (re)start a watcher.
 #   1  could not start (no repo resolved, unusable state dir, pidfile not
-#      takeable, baseline fetch failed), or --ignore was given something that
-#      is not a list of numbers -> fix the cause, do not spin.
+#      takeable, baseline fetch failed, .orca/project.json unreadable, Linear
+#      tracker without LINEAR_API_KEY), or --ignore was given something that
+#      is not a list of numbers and Linear identifiers -> fix the cause, do
+#      not spin.
 #   3  a watcher is ALREADY running for this repo. From a launch: this
 #      invocation did nothing, so relaunching identically just returns 3
 #      again. From --status: the incumbent's pid is printed. If the incumbent
@@ -60,7 +78,8 @@
 #
 # State: $GH_WATCH_STATE_DIR, else $XDG_RUNTIME_DIR/gh-watch-<uid>, else
 # $TMPDIR (or /tmp)/gh-watch-<uid>. One pidfile per repo, so different repos
-# watch concurrently, and one ignore file per repo beside it. NEVER
+# watch concurrently, and one ignore file per repo beside it. A watcher in
+# Linear mode also records its team and project there, for --status. NEVER
 # ~/.claude/jobs/ — the harness reserves that.
 # A stale pidfile (killed/crashed watcher) cannot wedge the script: the
 # recorded pid must be alive AND still be a gh-watch for THIS repo to be
@@ -141,6 +160,10 @@ pidfile="$state_dir/$repo_slug.pid"
 # watcher: the caller writes it once and every watcher for the repo — this one,
 # and the one that replaces it after an exit — reads the same file.
 ignore_file="$state_dir/$repo_slug.ignore"
+# `<team>[/<project>]` while a Linear-mode watcher holds the pidfile. The
+# watcher writes it after it takes the pidfile and removes it with the pidfile,
+# and --status reads it only when the pidfile names a live watcher.
+linear_file="$state_dir/$repo_slug.linear"
 
 # The set as written, or "" when there is none. A missing file is the ordinary
 # state (nobody has ignored anything), not an error.
@@ -167,7 +190,8 @@ read_ignore() {
 }
 
 # Drop every row of snapshot $1 whose number is in the space-separated set $2.
-# `snapshot()` emits `number updatedAt labels`, so the number is the first
+# `snapshot()` emits `number updatedAt labels` for GitHub and `identifier
+# fingerprint labels` for Linear, so the number or identifier is the first
 # field and awk's default splitting finds it with no new dependency.
 #
 # The set reaches awk through the ENVIRONMENT, not through `-v`. `-v` runs its
@@ -240,6 +264,8 @@ if [ "$mode" = status ]; then
   ignoring="$(read_ignore)"
   if live_watcher "$incumbent"; then
     echo "watcher running for $repo (pid $incumbent)"
+    linear_on="$(cat "$linear_file" 2>/dev/null)"
+    [ -n "$linear_on" ] && echo "linear: $linear_on"
     [ -n "$ignoring" ] && echo "ignoring: $ignoring"
     exit 3
   fi
@@ -263,13 +289,13 @@ if [ "$mode" = ignore ]; then
   # for the rest of this branch, which exits a few lines below.
   set -f
   # shellcheck disable=SC2086
+  # A token is an issue/PR number, or a Linear identifier: an upper-case team
+  # key, a dash and a number, the way Linear prints it in every row.
   for token in $ignore_arg; do
-    case "$token" in
-      *[!0-9]*)
-        echo "gh-watch.sh --ignore expects issue/PR numbers, got '$token'"
-        exit 1
-        ;;
-    esac
+    [[ "$token" =~ ^([0-9]+|[A-Z][A-Z0-9]*-[0-9]+)$ ]] || {
+      echo "gh-watch.sh --ignore expects issue/PR numbers or Linear identifiers (TEAM-123), got '$token'"
+      exit 1
+    }
     ignore_set="${ignore_set:+$ignore_set }$token"
   done
   set +f
@@ -317,6 +343,54 @@ if [ "$mode" = ignore ]; then
     echo "ignore set cleared for $repo"
   fi
   exit 0
+fi
+
+# TRACKER. Resolved before --takeover stops anything, so a launch that cannot
+# start leaves the incumbent running.
+#
+# The reader runs only when the git root of the working directory HAS a
+# .orca/project.json. Without one the watcher is the GitHub watcher it always
+# was: it needs no git repo, since the repo can come from argv, and it needs no
+# reader installed. With one, the reader validates the whole file, and a file
+# it rejects stops the launch: a broken file is never read as a missing one.
+#
+# The reader is looked up where install.sh puts it, beside this script: as
+# `orca-project.sh` (claude style, and a checkout, which is what the tests run)
+# or as `orca-project` (agents style). `orca-project` on PATH is the fallback.
+linear_team=""
+linear_project=""
+project_root="$(git rev-parse --show-toplevel 2>/dev/null)"
+project_file="$project_root/.orca/project.json"
+if [ -n "$project_root" ] && { [ -e "$project_file" ] || [ -L "$project_file" ]; }; then
+  reader=""
+  for r in "$(dirname "$0")/orca-project.sh" "$(dirname "$0")/orca-project" "$(command -v orca-project 2>/dev/null)"; do
+    if [ -n "$r" ] && [ -f "$r" ]; then
+      reader="$r"
+      break
+    fi
+  done
+  [ -n "$reader" ] || {
+    echo "orca-project.sh not found beside $0 or on PATH; it is needed to read $project_file"
+    exit 1
+  }
+  tracker="$(sh "$reader" tracker)" || {
+    echo "could not read the tracker from $project_file"
+    exit 1
+  }
+  if [ "$tracker" = linear ]; then
+    linear_team="$(sh "$reader" linear.team)" || {
+      echo "could not read linear.team from $project_file"
+      exit 1
+    }
+    linear_project="$(sh "$reader" linear.project)" || {
+      echo "could not read linear.project from $project_file"
+      exit 1
+    }
+    [ -n "${LINEAR_API_KEY:-}" ] || {
+      echo "LINEAR_API_KEY is not set; $project_file names the linear tracker, so the watcher needs it"
+      exit 1
+    }
+  fi
 fi
 
 if [ "$mode" = takeover ]; then
@@ -431,13 +505,23 @@ sleep_pid=""
 # shellcheck disable=SC2317,SC2329
 release() {
   [ -n "$sleep_pid" ] && kill "$sleep_pid" 2>/dev/null
-  [ "$(cat "$pidfile" 2>/dev/null)" = "$$" ] && rm -f "$pidfile"
+  [ "$(cat "$pidfile" 2>/dev/null)" = "$$" ] && rm -f "$linear_file" "$pidfile"
   return 0
 }
 trap 'release' EXIT
 # Signals exit 0, not 130/143: the exit-code contract is {0,1,3}, and a watcher
 # stopped by a signal is one the caller should restart — which is what 0 means.
 trap 'release; exit 0' INT TERM HUP
+# Record the mode for --status. A GitHub-mode watcher removes the file, so a
+# record left by a Linear watcher that was killed hard is not reported for it.
+if [ -n "$linear_team" ]; then
+  (printf '%s\n' "$linear_team${linear_project:+/$linear_project}" >"$linear_file") 2>/dev/null || {
+    echo "could not write the watcher mode file $linear_file for $repo"
+    exit 1
+  }
+else
+  rm -f "$linear_file" 2>/dev/null
+fi
 # Built from the GraphQL-backed CLI listings, NOT from `repos/<repo>/issues`.
 # That REST listing served inconsistent EMPTY responses for minutes at a time
 # from a bad replica — it answered `[]` while `gh pr list` returned the PR that
@@ -453,8 +537,29 @@ trap 'release; exit 0' INT TERM HUP
 # Only a non-zero exit means "no answer", and only that returns non-zero here.
 # Conflating the two would leave the watcher deaf on exactly the repos where a
 # first issue arriving is the thing worth waking up for.
+#
+# In Linear mode the open Linear issues join the same snapshot (see
+# linear_snapshot below), so the confirm, the ignore set and the quiet expiry
+# treat a Linear row like any other.
+#
+# The answer goes into $snap, not to stdout: the function runs in THIS shell,
+# never in `$(...)`, because it keeps state between polls (the last good
+# Linear rows, and whether Linear is failing).
+#
+# A FAILED LINEAR FETCH MUST NOT DEAFEN GITHUB. Before the baseline it fails
+# the snapshot, so a baseline without Linear exits 1 like any failed baseline.
+# After it, the last good Linear rows stand in for the missing ones and the
+# GitHub rows are compared as usual: a revoked key or a rate limit then costs
+# Linear detection only, not a PR review going unseen until the quiet expiry.
+# One stderr line marks the start of a failure episode and one its end, never
+# one per poll, and neither holds the key.
+linear_ok=""
+linear_last=""
+linear_failing=0
+linear_label="$linear_team${linear_project:+/$linear_project}"
 snapshot() {
-  local issues prs
+  local issues prs linear=""
+  snap=""
   # stderr is dropped, as it was on the call this replaced: the exit status
   # already says "no answer", and a listing that is failing fails on every poll
   # — 110 copies of the same gh error in the output the orchestrator reads. A
@@ -465,10 +570,106 @@ snapshot() {
   prs=$(gh pr list --repo "$repo" --state open --limit 50 \
     --json number,updatedAt,labels \
     --jq '.[] | "\(.number) \(.updatedAt) \([.labels[].name] | join(","))"' 2>/dev/null) || return 1
-  {
+  if [ -n "$linear_team" ]; then
+    if linear=$(linear_snapshot); then
+      linear_ok=1
+      linear_last="$linear"
+      if [ "$linear_failing" = 1 ]; then
+        echo "linear fetch for $linear_label recovered" >&2
+        linear_failing=0
+      fi
+    else
+      [ -n "$linear_ok" ] || return 1
+      if [ "$linear_failing" != 1 ]; then
+        echo "linear fetch for $linear_label failed; keeping its last good rows and watching GitHub" >&2
+        linear_failing=1
+      fi
+      linear="$linear_last"
+    fi
+  fi
+  snap="$({
     [ -n "$issues" ] && printf '%s\n' "$issues"
     [ -n "$prs" ] && printf '%s\n' "$prs"
-  } | sort
+    [ -n "$linear" ] && printf '%s\n' "$linear"
+  } | sort)"
+}
+# The open issues of the Linear team (and project, when set) as rows of
+# `identifier fingerprint labels`, for example
+#   IQONAI-28 In_Progress|alice|9c1e2f4a-0b7d-4c55-a2e1-3f6d8b9a1c00|2026-11-16T10:00:00.000Z bug,p1
+# The fingerprint is status|assignee|newest comment id|its updatedAt, with
+# whitespace turned into `_` so it stays one field; `-` stands for no assignee
+# or no comment. The issue's own updatedAt is left out: the fingerprint holds
+# the fields a wake-up is for, and nothing else.
+#
+# THE NEWEST COMMENT is read explicitly: `comments(first: 1, orderBy:
+# updatedAt)`. Linear's schema documents forward pagination (`first`) as newest
+# first, so that one node is the comment written or edited last, however many
+# comments the issue has. A new comment changes its id, an edit changes its
+# updatedAt, and a deleted newest comment hands the slot to the one before it.
+#
+# Open means any state type except completed and canceled. EVERY OPEN ISSUE is
+# read: the query pages through `pageInfo { hasNextPage endCursor }` with
+# `after`, 50 issues a page, ordered by createdAt so the cursor walks a stable
+# order while issues are edited. The row set therefore does not depend on the
+# sort order. PAGE LIMIT: $linear_page_limit pages. A team that still has a
+# next page after the last one is a FAILED fetch, never a silently shorter
+# row set. Each issue reads at most 50 labels.
+#
+# THE KEY NEVER LEAVES THIS PROCESS EXCEPT ON A PIPE. `printf` is a shell
+# builtin, so it runs with no argv of its own, and curl reads the header from
+# stdin (`-H @-`): the key is never in curl's argv, which any local user can
+# read in the process list, and never in a file. Linear personal API keys take
+# `Authorization: <key>` with no `Bearer` prefix. stderr is dropped, as for
+# the gh listings above.
+#
+# A GraphQL error comes back as HTTP 200 with an `errors` array, so success is
+# a response with no errors, an issue list and a page info, not just a zero
+# exit from curl. `--max-time` bounds a fetch that hangs, so a stalled
+# connection is a failed fetch and not a watcher that stops polling.
+linear_page_limit=20
+# SC2016: `$filter` and `$after` are GraphQL variables, not shell ones.
+# shellcheck disable=SC2016
+linear_query='query($filter: IssueFilter, $after: String) { issues(first: 50, after: $after, orderBy: createdAt, filter: $filter) { nodes { identifier state { name } assignee { displayName } labels(first: 50) { nodes { name } } comments(first: 1, orderBy: updatedAt) { nodes { id updatedAt } } } pageInfo { hasNextPage endCursor } } }'
+linear_snapshot() {
+  local body resp page=0 after="" next page_rows rows=""
+  while :; do
+    page=$((page + 1))
+    [ "$page" -le "$linear_page_limit" ] || return 1
+    body=$(jq -cn --arg q "$linear_query" --arg team "$linear_team" --arg project "$linear_project" \
+      --arg after "$after" '
+      {query: $q, variables: {
+        after: (if $after == "" then null else $after end),
+        filter: (
+          {team: {key: {eq: $team}}, state: {type: {nin: ["completed", "canceled"]}}}
+          + (if $project == "" then {} else {project: {name: {eq: $project}}} end))}}') || return 1
+    resp=$(printf 'Authorization: %s\n' "$LINEAR_API_KEY" |
+      curl -sSf --max-time 20 -H @- -H 'Content-Type: application/json' \
+        --data "$body" https://api.linear.app/graphql 2>/dev/null) || return 1
+    # Line 1 is the next cursor, or empty on the last page; the rest are rows.
+    page_rows=$(printf '%s' "$resp" | jq -r '
+      if (.errors | length) > 0 or (.data.issues.nodes | type) != "array"
+        or (.data.issues.pageInfo.hasNextPage | type) != "boolean" then error("no issue page")
+      elif .data.issues.pageInfo.hasNextPage and ((.data.issues.pageInfo.endCursor // "") == "") then
+        error("a next page with no cursor")
+      else
+        (if .data.issues.pageInfo.hasNextPage then .data.issues.pageInfo.endCursor else "" end),
+        (.data.issues.nodes[]
+          | (.comments.nodes[0] // {}) as $c
+          | ([(.state.name // "-"), (.assignee.displayName // "-"),
+              ($c.id // "-"), ($c.updatedAt // "-")]
+              | map(gsub("\\s"; "_")) | join("|")) as $fp
+          | "\(.identifier) \($fp) \([.labels.nodes[].name] | sort | join(","))")
+      end' 2>/dev/null) || return 1
+    next="${page_rows%%$'\n'*}"
+    case "$page_rows" in
+      *$'\n'*) page_rows="${page_rows#*$'\n'}" ;;
+      *) page_rows="" ;;
+    esac
+    [ -n "$page_rows" ] && rows="${rows:+$rows$'\n'}$page_rows"
+    [ -n "$next" ] || break
+    after="$next"
+  done
+  printf '%s' "$rows"
 }
 # Seconds between a poll that differs from the baseline and the fetch that has
 # to differ from it too before the watcher exits. It is the whole cost of the
@@ -496,10 +697,11 @@ fi
 # A FAILED baseline is fatal; an EMPTY one is not. The watcher has nothing to
 # compare against if it never got an answer, but "" is a perfectly good baseline
 # for a repo with nothing open yet.
-base=$(snapshot) || {
+snapshot || {
   echo "baseline fetch failed for $repo"
   exit 1
 }
+base="$snap"
 # The set in force when the baseline was taken. It is half of the union below,
 # so it is read here rather than defaulted to empty: a watcher started while
 # numbers are already ignored must not treat its first poll as a release.
@@ -512,7 +714,8 @@ for _ in $(seq 1 110); do
   sleep_pid=""
   # Only a failed fetch is skipped. An empty answer is a real snapshot: it says
   # the repo has nothing open, which differs from a baseline that had something.
-  cur=$(snapshot) || continue
+  snapshot || continue
+  cur="$snap"
   # RE-READ THE SET EVERY POLL. Taking it once at startup would mean a restart
   # per change of ownership, and a restart is a re-invocation of the caller —
   # the very thing being removed.
@@ -547,7 +750,8 @@ for _ in $(seq 1 110); do
     # A FAILED confirming fetch confirmed nothing. Leave the baseline standing
     # and poll on: the next poll sees the same difference and confirms it then,
     # one poll late instead of wrong.
-    confirm=$(snapshot) || continue
+    snapshot || continue
+    confirm="$snap"
     # FILTERED TOO, with the SAME set the poll used. This is the easiest place
     # to leave the ignore set out, and the most expensive: the confirm is taken
     # seconds after a differing poll, which is exactly when the caller's own

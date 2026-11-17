@@ -152,9 +152,11 @@ On Linear:
 - **Each poll on Linear:** `list_issues` with `team`, `project` (when
   `linear.project` is set) and `updatedAt` set to the time of the last poll,
   then `list_comments` on each of those issues.
-- **No watcher yet:** the watcher polls GitHub only, so a change on Linear
-  does not wake orca. Cap the idle poll cadence at about 600s on a Linear
-  project. The watcher task is https://github.com/iQonAi/orca/issues/53.
+- **Watcher on Linear:** the watcher reads the tracker from
+  `.orca/project.json` and, on a Linear project, polls the team's open
+  Linear issues beside GitHub, so a change on Linear wakes orca. It needs
+  `LINEAR_API_KEY` in its environment and exits 1 without it. Report that
+  under Blocked; never write the key to a file or a log.
 
 On GitHub:
 
@@ -185,11 +187,11 @@ On GitHub:
 - Poll cadence is ADAPTIVE: 60s when issue/PR comments are actively flowing
   (fresh comment seen in the last few minutes) or a review is imminently
   expected; decay gradually (60 → 180 → 600) as activity quiets; ~600s
-  baseline during worker waits; up to ~1800s when fully idle (about 600s
-  on a Linear project; see Signals).
+  baseline during worker waits; up to ~1800s when fully idle.
 - 30s DETECTION: the wakeup floor is 60s, so a background watcher
   (`~/.claude/scripts/gh-watch.sh <owner/repo>`, run_in_background) polls the
-  repo's open issues and PRs every 30s and EXITS on any issue/comment/label
+  repo's open issues and PRs every 30s (on a Linear project, the team's open
+  Linear issues as well) and EXITS on any issue/comment/label
   change a second fetch confirms — ~35s on the poll that sees one. Its exit
   re-invokes the orchestrator immediately. It self-expires after ~55min of
   quiet; RESTART it on every exit (change or expiry). Wakeups stay as fallback.
@@ -206,8 +208,9 @@ On GitHub:
     nothing is). Read the EXIT instead: 0 = change, ~55min expiry, or a signal
     stopped it, RESTART it; 3 = a watcher was already running and this launch
     did nothing, so relaunching it identically just returns 3 again; 1 = it
-    could not start (no repo / unusable state dir / baseline fetch failed),
-    fix the cause rather than spinning. There are no other exit codes.
+    could not start (no repo / unusable state dir / baseline fetch failed /
+    broken `.orca/project.json` / Linear without `LINEAR_API_KEY`), fix the
+    cause rather than spinning. There are no other exit codes.
   - OWNED SET — left alone, the watcher wakes you for YOUR OWN work: through a
     dispatch cycle your workers push commits, open PRs and post review
     comments, and each of those exits the watcher and re-invokes you to report
@@ -215,8 +218,9 @@ On GitHub:
     `~/.claude/scripts/gh-watch.sh --ignore "<numbers>" <owner/repo>`, run in
     the FOREGROUND — it writes the set and exits 0 without launching anything.
     A change confined to those numbers is no longer a wake-up. Issue and PR
-    numbers share one set. Write the FULL set every time: it REPLACES the
-    previous one, and `--ignore ""` clears it. Update it when a worker's PR
+    numbers share one set, and on a Linear project Linear identifiers go in
+    it too (`--ignore "53 IQONAI-28"`). Write the FULL set every time: it
+    REPLACES the previous one, and `--ignore ""` clears it. Update it when a worker's PR
     opens (add the PR number beside its issue) and at teardown after the merge.
     Never restart the watcher to change the set — it re-reads the set on every
     poll, and the restart would itself be the re-invocation this exists to
@@ -236,9 +240,10 @@ On GitHub:
     `~/.claude/scripts/gh-watch.sh --status <owner/repo>`, run in the
     FOREGROUND (it never launches anything, never spins, and returns at once).
     0 = nobody is watching this repo; 3 = a live watcher holds it, and its pid
-    is printed; 1 = the state dir is unusable. It also prints `ignoring: <set>`
-    when the repo has one, which is how you check what you are currently deaf
-    to.
+    is printed; 1 = the state dir is unusable. It prints
+    `linear: <team>[/<project>]` when the live watcher polls Linear. It also
+    prints `ignoring: <set>` when the repo has one, which is how you check
+    what you are currently deaf to.
   - A watcher you did not launch: a `--status` 3 (or a launch that exits 3)
     when you have no live watcher background job of your own means the
     incumbent belongs to another/previous session. Its exit notifies THEM, not
@@ -269,8 +274,8 @@ The tracker commands are in the table under Epics and tasks.
    root.
 3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`. Add
    the issue number to the watcher's ignore set (`--ignore`, full set) before
-   the worker starts pushing. A Linear task has no GitHub number, so only its
-   PR goes in the set.
+   the worker starts pushing. For a Linear task, add its identifier (for
+   example `IQONAI-28`) instead.
 4. House rules: workers follow the project's own contribution rules
    (CLAUDE.md / CONTRIBUTING) where they exist; orca adds no formatting or
    code style rules of its own.
