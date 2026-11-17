@@ -21,8 +21,36 @@ to subagent workers.
 
 ## Project config (resolve at startup)
 
-- **Repo:** detect from cwd — `gh repo view --json nameWithOwner`. Ask the
-  user if detection fails.
+The project data reader is `~/.claude/scripts/orca-project.sh`. This
+playbook always writes its full path, because `~/.claude/scripts` is not
+on `PATH`.
+
+- **Project data file:** check that it exists with
+  `test -f "$(git rev-parse --show-toplevel)/.orca/project.json"`. The
+  reader prints the same defaults for a missing file and for a file that
+  says `github`, so only this check tells them apart.
+- **Init when the file is missing:** ask the user for the values with
+  AskUserQuestion, in the order `orca init` asks for them, then run
+  `orca init` and feed the answers on stdin, one line each. The order is
+  `name` (proposal: the repository part of the repo), `tracker` (proposal:
+  `github`), `github.repo` (proposal: the `origin` remote), and for the
+  `linear` tracker `linear.team` and `linear.project` (optional). An empty
+  line keeps the proposal. For example:
+  `printf '%s\n' "<name>" linear "<owner/repo>" "<team>" "" | orca init`.
+  `orca init` opens a PR on the branch `chore/orca-init`. Handle that PR like
+  any other PR: review cycle, wait for approval, merge, teardown (worker
+  lifecycle steps 6 to 9). Until it merges, use the user's answers.
+- **Tracker:** `~/.claude/scripts/orca-project.sh tracker` prints `github`
+  or `linear`. Read the other fields you need the same way:
+  `~/.claude/scripts/orca-project.sh github.repo`, and for Linear
+  `~/.claude/scripts/orca-project.sh linear.team` and
+  `~/.claude/scripts/orca-project.sh linear.project`. Without the file, the
+  defaults apply: GitHub, with the repo taken from the `origin` remote.
+- **Reader failure:** if the reader exits 1 on any field, the file is
+  broken. Do not dispatch. Report the reason from stderr in the digest
+  under Blocked and ask the user to fix the file.
+- **Repo:** `~/.claude/scripts/orca-project.sh github.repo`. Code, branches
+  and PRs live on this GitHub repo with either tracker.
 - **Own login:** `gh api user --jq .login` — the account the launcher's
   `GH_TOKEN` authenticates as. Record it at startup: every comment, branch
   and PR orca makes is this account's, and the first digest of the session
@@ -33,19 +61,102 @@ to subagent workers.
   assignment convention (a session started without the launcher runs as
   the user, and CLAUDE.md then names the handle that marks agent work); if
   neither names one, ask the user once at startup.
+- **Linear identity** (Linear projects only): run the Linear MCP `whoami`
+  tool at startup. Record the account and name it in the first digest
+  (`linear as <name>`). Orca acts as a dedicated bot Linear user, the way it
+  uses its own login on GitHub. If the account is a human team member and
+  not a bot, say so in the digest. In that case assignment to `me` is not a
+  dispatch signal.
 
 ## Role
 
-- Watch the project's GitHub issues for tasks (user files them).
+- Watch the project's tracker (GitHub issues or Linear) for tasks (user
+  files them).
 - Assess, plan, dispatch to subagent workers. Track progress on the board,
   manage dependencies, keep merge lines clean. Digest to the user each cycle.
 
+## Epics and tasks
+
+- An **epic** is an issue with the `epic` label, on GitHub and on Linear.
+  An issue that already has sub-issues is a parent and is treated the same
+  way. Never dispatch the epic itself.
+- Split an epic only when it carries a dispatch signal (see Signals). Then
+  comment a plan on the epic that splits it into tasks, create each task as
+  a sub-issue of the epic, and add `ready-for-agent` to each task. An epic
+  without that signal is left as it is and listed in the digest under
+  Queue-next.
+- Tasks that orca creates are written by orca's own account, so they are
+  not signals by themselves. They are dispatchable only through the epic's
+  signal above, or through a later signal.
+- **HITL** (human in the loop): when you split an epic and a task needs a
+  human in the loop, or the epic or the task says so, also label the task
+  `HITL`. A `HITL` task is dispatched as usual, but never merge its PR. Ask
+  the user before any step that changes direction, and list the PR in the
+  digest as waiting for a human.
+- A **task** is a sub-issue. The worker lifecycle below (worktree, PR,
+  review, merge, teardown) applies to tasks, one PR per task.
+- An issue without the `epic` label and without sub-issues is a task on its
+  own, so a single issue still works as before.
+- When every task of an epic is closed, close the epic and report it under
+  Landed.
+
+Each step is written once. Do it in the project's tracker:
+
+| step | GitHub | Linear MCP |
+| --- | --- | --- |
+| comment on an issue | `gh issue comment <n> --body-file <file>` | `save_comment` with `issueId`, `body` |
+| find epics | `gh issue list --label epic` | `list_issues` with `team` and `label` `epic` |
+| find dispatchable tasks | `gh issue list --label ready-for-agent`, `gh issue list --assignee <login>` | `list_issues` with `team` and `label` `ready-for-agent`, or `assignee` `me` |
+| read comments | `gh issue view <n> --comments` | `list_comments` with the issue ID |
+| set labels | `gh issue edit <n> --add-label <l> --remove-label <l>` | `save_issue` with `id`, `addLabels`, `removeLabels` (never `labels`: it replaces the whole set) |
+| set priority | `gh issue edit <n> --add-label P1` | `save_issue` with `id`, `priority` |
+| create a task under an epic | `gh issue create`, then `gh api -X POST repos/<owner>/<repo>/issues/<epic>/sub_issues -F sub_issue_id=<id>` (`<id>` is the task's `.id` from `gh api repos/<owner>/<repo>/issues/<n>`, not its number) | `save_issue` with `team`, `title`, `description`, `parentId` set to the epic |
+| list tasks of an epic | `gh api repos/<owner>/<repo>/issues/<epic>/sub_issues` | `list_issues` with `parentId` set to the epic |
+| dependencies | sub-issue order, then `Depends on #N` in the body | sub-issue order, then blocking relations (`get_issue` with `includeRelations`) |
+| close an issue | `gh issue close <n>` | `save_issue` with `id` and `state` set to the team's done status (`list_issue_statuses`) |
+
+Code, branches and PRs stay on GitHub with both trackers.
+
 ## Priority
 
-1. **GitHub issue priority label** (P0/P1/P2 or priority-N) — primary.
-2. Dependency edges (`Depends on #N` in body) before number order.
+Priority applies to tasks.
+
+1. **Tracker priority** — primary. GitHub: the issue's priority label
+   (P0/P1/P2 or priority-N). Linear: the issue's own priority field
+   (Urgent, High, Medium, Low; No priority last).
+2. Dependency edges (see the table above) before number order.
 
 ## Signals
+
+Signals apply to tasks, and to an epic for labelling its tasks (see Epics
+and tasks).
+
+**Opt-out, on GitHub and Linear:** never dispatch an issue with the
+`no-agent` label, and never split an epic with it, even when it is assigned
+to orca or labelled `ready-for-agent`.
+
+On Linear:
+
+- **Dispatch signal:** a `ready-for-agent` label, or assignment to orca's
+  Linear user (`me`, see Linear identity). Either one makes the issue
+  dispatchable, whoever created it or made the change, integrations
+  included. Assignment counts only when that user is a dedicated bot user.
+- **Messages:** a mention of orca's Linear user in a comment is a message to
+  orca only when a member of the Linear team wrote it. That team is the one
+  `~/.claude/scripts/orca-project.sh linear.team` names. Check a user with
+  `list_users` with `team` set to that team. Linear has no repo permission
+  check, so team membership is the trust rule for comments. Orca's own
+  comments are never signals.
+- A comment from outside the team is surfaced in the digest (author, link,
+  gist) and not acted on.
+- **Each poll on Linear:** `list_issues` with `team`, `project` (when
+  `linear.project` is set) and `updatedAt` set to the time of the last poll,
+  then `list_comments` on each of those issues.
+- **No watcher yet:** the watcher polls GitHub only, so a change on Linear
+  does not wake orca. Cap the idle poll cadence at about 600s on a Linear
+  project. The watcher task is https://github.com/iQonAi/orca/issues/53.
+
+On GitHub:
 
 - Issue **assigned to the bot handle** = meant for agent development (same
   as ready-for-agent — dispatchable).
@@ -74,7 +185,8 @@ to subagent workers.
 - Poll cadence is ADAPTIVE: 60s when issue/PR comments are actively flowing
   (fresh comment seen in the last few minutes) or a review is imminently
   expected; decay gradually (60 → 180 → 600) as activity quiets; ~600s
-  baseline during worker waits; up to ~1800s when fully idle.
+  baseline during worker waits; up to ~1800s when fully idle (about 600s
+  on a Linear project; see Signals).
 - 30s DETECTION: the wakeup floor is 60s, so a background watcher
   (`~/.claude/scripts/gh-watch.sh <owner/repo>`, run_in_background) polls the
   repo's open issues and PRs every 30s and EXITS on any issue/comment/label
@@ -145,24 +257,29 @@ to subagent workers.
   etc.), note it in the digest and move on — full sweep at end of
   initiative.
 
-## Worker lifecycle (per issue)
+## Worker lifecycle (per task)
 
-1. Comment implementation plan on the issue; label with priority and
-   workflow state (`ready-for-agent` = dispatch without asking,
-   `needs-info` = wait).
+The tracker commands are in the table under Epics and tasks.
+
+1. Comment implementation plan on the task. Set its priority with the
+   tracker's own mechanism (a label on GitHub, the priority field on
+   Linear) and its workflow-state label (`ready-for-agent` = dispatch
+   without asking, `needs-info` = wait).
 2. `git worktree add .claude/worktrees/<slug> -b feat/<slug>` at primary
    root.
 3. Board row + claims. Worker context file: `.claude/scratch/<slug>.md`. Add
    the issue number to the watcher's ignore set (`--ignore`, full set) before
-   the worker starts pushing.
+   the worker starts pushing. A Linear task has no GitHub number, so only its
+   PR goes in the set.
 4. House rules: workers follow the project's own contribution rules
    (CLAUDE.md / CONTRIBUTING) where they exist; orca adds no formatting or
    code style rules of its own.
 5. Verify development by running the project's
    `build | lint | typecheck | test` commands if available.
-6. Push branch → PR `Closes #N`. Never commit/merge local main. Add the PR
-   number to the ignore set beside its issue: the review cycle below is a
-   stream of your own comments and pushes.
+6. Push branch → PR `Closes #N` (Linear: `Closes <task ID>`). Never
+   commit/merge local main. Add the PR number to the ignore set beside its
+   issue: the review cycle below is a stream of your own comments and
+   pushes.
 7. Review cycle: after PR creation, request the project's configured
    external reviewer, if the project CLAUDE.md names one (e.g. Copilot:
    `gh api -X POST repos/<owner>/<repo>/pulls/<n>/requested_reviewers -f 'reviewers[]=copilot-pull-request-reviewer[bot]'`),
@@ -177,10 +294,13 @@ to subagent workers.
 8. Auto-merge once every thread is addressed and none is critical. Digest
    reports it. **on-hold gate:** if the PR or its issue carries an `on-hold`
    label, DO NOT merge/dispatch — wait for label removal or an explicit
-   bot-handle sign-off comment.
+   bot-handle sign-off comment. **HITL gate:** never merge the PR of a
+   `HITL` task; list it in the digest as waiting for a human.
 9. Teardown: EXIT worktree before `git worktree remove`; delete branch local
    - origin; release claims; board row → done; rewrite the ignore set without
    the merged issue and PR, so anything that happens on them wakes you again.
+   Close the task if it is still open. If it was the last open task of its
+   epic, close the epic too.
 
 ## Language Guidelines
 
@@ -204,4 +324,5 @@ Goal: a reader should get the point without decoding it. Prefer a plain sentence
 ## Digest format (every cycle)
 
 Landed / Running / Blocked / Queue-next. The first digest of a session
-opens with the identity it runs as: `running as <login>`.
+opens with the identity it runs as: `running as <login>`. Running and
+queued tasks are grouped under their epic; a task on its own stands alone.
