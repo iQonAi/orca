@@ -63,7 +63,7 @@ jobs:
       # reports for that asset. What it buys: the release tag is mutable, so
       # this stops its contents being swapped under us later. What it does not
       # buy: any evidence that this capture is the binary upstream intended —
-      # mvdan/sh publishes no signed checksums, and that gap is accepted (#25).
+      # mvdan/sh publishes no signed checksums, and that gap is accepted.
       # The hash is tied to the version AND the architecture. Bumping
       # SHFMT_VERSION or moving to arm64 runners changes the artifact, so the
       # hash must be recaptured in the same commit; the check fails loudly

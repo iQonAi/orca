@@ -508,7 +508,7 @@ wassert 'gh-watch: --takeover left no incumbent running' \
 # its life, so the liveness match has to allow one. Anchored on the repo alone
 # it did not, and every later question about that watcher was answered "none
 # running" — --status reported nothing while it polled, and a launch beside it
-# started a second watcher for the same repo (#30).
+# started a second watcher for the same repo.
 start_live 'octocat/watch-mode' --takeover
 LIVE_MODE="$REPLY"
 run_watch_in "$GH_WATCH_STATE_DIR" 3 "watcher running for octocat/watch-mode (pid $LIVE_MODE)" \
@@ -562,7 +562,7 @@ wassert 'gh-watch: the race left no lock directory behind' \
 
 # THE SNAPSHOT, AND THE CONFIRM ON TOP OF IT. `snapshot()` reads `gh issue list`
 # plus `gh pr list` — the REST listing it replaced served empty answers for
-# minutes at a time and the watcher reported them as "everything closed" (#32).
+# minutes at a time and the watcher reported them as "everything closed".
 # A poll that differs from the baseline is re-fetched, and the watcher exits
 # only if that answer disagrees with the BASELINE too.
 #
@@ -1517,7 +1517,7 @@ wassert 'install: default CLAUDE_HOME wires the literal ~ form, unexpanded' \
 printf '%s' "$OUT1" | grep -q 'backup:' && FRESH_BACKUP=1 || FRESH_BACKUP=0
 wassert 'install: fresh install makes no backups' test "$FRESH_BACKUP" = 0
 # The summary line belongs to a run that moved something aside: with nothing
-# to back up it is absent, and its guard must not turn the run into exit 1 (#17).
+# to back up it is absent, and its guard must not turn the run into exit 1.
 printf '%s' "$OUT1" | grep -q 'replaced files' && FRESH_REPLACED=1 || FRESH_REPLACED=0
 wassert 'install: fresh install prints no replaced-files line' test "$FRESH_REPLACED" = 0
 
@@ -1542,7 +1542,7 @@ wassert 'install: agents style creates no ~/.claude' test ! -d "$IH2/.claude"
 
 # no tty, no ORCA_STYLE -> refuse with exit 2 and install nothing, never hang
 # and never guess. An existing ~/.claude used to select the claude style with
-# only a notice, and the install then edited its settings.json (#16): it is
+# only a notice, and the install then edited its settings.json: it is
 # now the same refusal, and the directory stays empty. setsid drops the
 # controlling terminal, so /dev/tty cannot be opened, as in CI.
 IH3="$INST_TMP/h3"
@@ -1633,7 +1633,7 @@ wassert 'install: wired hook command names the custom CLAUDE_HOME' \
 # else the entry carries: the dedupe goes by the command an entry runs, never
 # by exact equality with the entry the installer writes. Exact equality missed
 # a hand-edited entry (a `matcher`, a `timeout` inside hooks[]) and appended a
-# second copy on every run (#15). A recognised entry leaves the file untouched
+# second copy on every run. A recognised entry leaves the file untouched
 # - a rewrite would have backed it up and reformatted it - so cmp is asserted
 # beside the entry count.
 IH19="$INST_TMP/h19"
@@ -1687,7 +1687,7 @@ wassert 'install: a rerun beside the unrelated entry keeps exactly two entries' 
 
 # ...and so is an entry whose command merely CONTAINS the hook path: wired
 # means equal to it, never a substring of it, or a `.bak` beside the hook
-# would pass for the hook and orca would be left unwired (#38).
+# would pass for the hook and orca would be left unwired.
 IH26="$INST_TMP/h26"
 mkdir -p "$IH26/.claude"
 printf '%s\n' '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"~/.claude/hooks/orca-start-watcher.sh.bak"}]}]}}' \
@@ -1723,7 +1723,7 @@ wassert 'install: a hand-wired entry spelling the default path out in full is no
 
 # a trailing slash on CLAUDE_HOME names the same home: `/x/` used to build the
 # hook identity as `/x//hooks/...`, which matched no hand-wired `/x/hooks/...`,
-# so install appended a duplicate on every run (#38).
+# so install appended a duplicate on every run.
 IH27="$INST_TMP/h27"
 CH27="$INST_TMP/ch27"
 mkdir -p "$IH27" "$CH27"
@@ -1801,7 +1801,7 @@ else
 fi
 
 # literal-tilde ORCA_REPO: a QUOTED ORCA_REPO="~/x" reaches install.sh with the
-# tilde unexpanded, so install.sh expands it itself. Regression for #24, where
+# tilde unexpanded, so install.sh expands it itself. Before the fix,
 # the strip pattern was itself tilde-expanded and "~/x" resolved to "$HOME/~/x"
 # - cloning into a directory literally named `~` inside the user's home. Only
 # the piped path reaches that code, so these drive it the same way as above.
@@ -2109,7 +2109,7 @@ wassert 'uninstall: custom CLAUDE_HOME settings.json is unwired' \
 
 # ...spelled with a trailing slash at uninstall time, it is still the same
 # home: the installer's own entry is found and dropped, where `/x//hooks/...`
-# used to find nothing and report no orca entry (#38).
+# used to find nothing and report no orca entry.
 IH28="$INST_TMP/h28"
 CH28="$INST_TMP/ch28"
 mkdir -p "$IH28"
