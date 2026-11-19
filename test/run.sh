@@ -2749,7 +2749,8 @@ chmod u+rwx "$IM10/.claude/agents"
 # collaborator-permission call from canned JSON (through real jq, as gh's
 # --jq would) and accepts ONE token, so "GH_TOKEN was set from the file" is
 # asserted, not assumed. The stub claude prints the argv and the identity it
-# was exec'd with, and can hold the session open. HOME, XDG_CONFIG_HOME and
+# was exec'd with (and the variables ORCA_STUB_SHOW names), and can hold
+# the session open. HOME, XDG_CONFIG_HOME and
 # CLAUDE_HOME are temp dirs; the install the checks look at is made by
 # install.sh itself, so the check sees exactly what a user's would.
 
@@ -2828,6 +2829,9 @@ printf 'stub claude argv:'
 printf ' [%s]' "$@"
 printf '\n'
 for v in GH_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL; do
+  printf '%s=%s\n' "$v" "${!v-unset}"
+done
+for v in ${ORCA_STUB_SHOW-}; do
   printf '%s=%s\n' "$v" "${!v-unset}"
 done
 if [ -n "${ORCA_STUB_HOLD:-}" ]; then
@@ -3031,7 +3035,7 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   wassert 'launcher: a spaceless gh warning beside a successful api user refuses the launch' test "$ORCA_RC" -eq 1
   orca_not_said 'launcher: a spaceless gh warning beside a successful api user reaches no git identity' 'GIT_AUTHOR_EMAIL='
 
-  # 3. repo: the permission must be write or better; no origin is named
+  # 4. repo: the permission must be write or better; no origin is named
   ORCA_ENV=(ORCA_STUB_PERM=read)
   run_orca "$REPO_SSH" --check
   wassert 'launcher: permission read fails --check' test "$ORCA_RC" -eq 1
@@ -3061,7 +3065,7 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: --repo a/b/c is named as not owner/repo' "fail: repo: 'a/b/c' is not owner/repo"
   wassert 'launcher: --repo a/b/c never reaches the permission API' bash -c "! grep -q collaborators '$L_CALLS'"
 
-  # 4. install: a dangling link is named with its target (the case from the
+  # 5. install: a dangling link is named with its target (the case from the
   # machine where a temp checkout vanished under the links), a missing file
   # is named, and the hook must be wired by the installer's own rule
   L_CH_DANGLING="$L_TMP/ch-dangling"
@@ -3152,7 +3156,53 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_not_said 'launcher: a refused launch execs nothing' 'stub claude'
   wassert 'launcher: a refused launch writes no session record' test ! -e "$L_RECORD"
 
-  # 5. instance: a running orca holds the record with its pid; a second
+  # 3. env: the env file is optional, held to the token's mode rule, parsed as
+  # literal KEY=value lines, and loses to a variable already set
+  run_orca "$REPO_SSH" --check
+  orca_said 'launcher: a missing env file is skipped with an ok line' \
+    "ok: env: $L_HOME/.config/orca/orca.env absent; skipped"
+  L_ENV="$L_HOME/.config/orca/orca.env"
+  printf '%s\n' '# Linear' '' '   ' '  # ORCA_T_MISSING=commented' 'LINEAR_API_KEY=lin_secret' \
+    'ORCA_T_EQ=a=b c' 'GH_TOKEN=ghp_fromfile' 'ORCA_T_SUB=$(mkdir '"$L_TMP"'/pwned)' >"$L_ENV"
+  chmod 600 "$L_ENV"
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a 0600 env file with comments and blank lines passes --check' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: a 0600 env file is reported with its mode' "ok: env: $L_ENV (mode 0600)"
+  orca_not_said 'launcher: --check never prints an env file value' 'lin_secret'
+  ORCA_ENV=(ORCA_STUB_SHOW='LINEAR_API_KEY ORCA_T_EQ ORCA_T_SUB ORCA_T_MISSING')
+  run_orca "$REPO_SSH"
+  orca_said 'launcher: an env file key is exported to claude' 'LINEAR_API_KEY=lin_secret'
+  orca_said 'launcher: an env file value splits on the first = and keeps its spaces' 'ORCA_T_EQ=a=b c'
+  orca_said 'launcher: an env file value is stored literally' 'ORCA_T_SUB=$(mkdir '"$L_TMP"'/pwned)'
+  wassert 'launcher: an env file value is never run as shell' test ! -e "$L_TMP/pwned"
+  orca_said 'launcher: the env file cannot replace GH_TOKEN' 'GH_TOKEN=ghp_stubtoken'
+  orca_said 'launcher: a commented-out key is not exported' 'ORCA_T_MISSING=unset'
+  wait_record_gone
+  ORCA_ENV=(LINEAR_API_KEY=lin_fromenv ORCA_STUB_SHOW=LINEAR_API_KEY)
+  run_orca "$REPO_SSH"
+  orca_said 'launcher: a variable already in the environment wins over the env file' 'LINEAR_API_KEY=lin_fromenv'
+  wait_record_gone
+  rm -f "$L_ENV"
+  L_ENV644="$L_TMP/env-644"
+  printf 'LINEAR_API_KEY=lin_secret\n' >"$L_ENV644"
+  chmod 644 "$L_ENV644"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENV644")
+  run_orca "$REPO_SSH"
+  wassert 'launcher: a 0644 env file refuses the launch' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a 0644 env file is refused with its mode and the chmod hint' \
+    "fail: env: $L_ENV644 is mode 644, not 0600 or 0400 (group or other can read it); run: chmod 600 $L_ENV644"
+  orca_not_said 'launcher: a 0644 env file launches nothing' 'stub claude'
+  L_ENVBAD="$L_TMP/env-bad"
+  printf '%s\n' 'GOOD=1' '1BAD=lin_secret' 'export X=lin_secret' 'lin_secret' >"$L_ENVBAD"
+  chmod 600 "$L_ENVBAD"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVBAD")
+  run_orca "$REPO_SSH"
+  wassert 'launcher: an invalid env file line refuses the launch' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: invalid env file lines are named by number' \
+    "fail: env: $L_ENVBAD line(s) 2 3 4 not KEY=value with a valid variable name"
+  orca_not_said 'launcher: an invalid env file line never prints its value' 'lin_secret'
+
+  # 6. instance: a running orca holds the record with its pid; a second
   # launch for the same repo is refused naming it, another repo is not, and
   # the record goes when the first exits. exec keeps the pid: the
   # backgrounded subshell IS the launcher IS the stub claude.

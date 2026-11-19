@@ -23,20 +23,32 @@
 # <id>+<login>@users.noreply.github.com address) are exported and claude
 # replaces this process: gh, git, the watcher and every worker inherit them.
 #
+# Per-machine variables such as LINEAR_API_KEY live in
+# ${XDG_CONFIG_HOME:-~/.config}/orca/orca.env (ORCA_ENV_FILE overrides), held
+# to the token file's mode rule. A missing file is skipped. Each line is
+# KEY=value, taken literally: no quotes, no expansion, never run as shell.
+# Blank lines and lines starting with # are skipped. A variable already set in
+# the environment, or by the launcher itself (GH_TOKEN, the git identity),
+# wins over the file. The values are exported to claude and never printed;
+# the launcher's own settings (ORCA_TOKEN_FILE, ORCA_STYLE, ...) are read from
+# the environment only.
+#
 # Checks, in order (each prints `ok:` or `fail:` with the reason):
 #   1. tools     gh, git, jq and claude on PATH
 #   2. identity  the token file exists, is not empty and is mode 0600 or 0400
 #                (a file group or world can read is refused, unread); gh api
 #                user succeeds with it - `running as <login>`
-#   3. repo      owner/repo from the checkout's origin remote (or --repo); the
+#   3. env       the env file, if present, is mode 0600 or 0400 and every
+#                line is blank, a comment or KEY=value with a valid name
+#   4. repo      owner/repo from the checkout's origin remote (or --repo); the
 #                bot's permission on it is write, maintain or admin
-#   4. install   the playbook, the SessionStart hook, the watcher and the
+#   5. install   the playbook, the SessionStart hook, the watcher and the
 #                project data reader resolve to real files - a dangling
 #                symlink is named - and, claude style, the hook is wired in
 #                settings.json by the installer's own identity rule (an
 #                entry whose command is the hook path, in the ~ or the
 #                absolute spelling)
-#   5. instance  no live orca holds this repository's session record
+#   6. instance  no live orca holds this repository's session record
 #
 # Session record: <config>/orca/sessions/<repo-slug> holds the pid of the
 # orca running for that repository. `exec` replaces this shell, so no EXIT
@@ -49,6 +61,7 @@ set -u
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/orca"
 TOKEN_FILE="${ORCA_TOKEN_FILE:-$CONFIG_DIR/token}"
+ENV_FILE="${ORCA_ENV_FILE:-$CONFIG_DIR/orca.env}"
 SESSIONS_DIR="$CONFIG_DIR/sessions"
 CH="${CLAUDE_HOME:-$HOME/.claude}"
 # as in install.sh: `/x/` names the same home as `/x`
@@ -84,6 +97,9 @@ or the branch already exists.
 Files
   $TOKEN_FILE
       the bot's token, mode 0600 or 0400 (ORCA_TOKEN_FILE overrides)
+  $ENV_FILE
+      optional KEY=value lines exported to claude, mode 0600 or 0400; a
+      variable already in the environment wins (ORCA_ENV_FILE overrides)
   $SESSIONS_DIR/<repo-slug>
       pid of the orca running for that repository
 
@@ -354,7 +370,44 @@ else
   fail "identity: not checked (no usable token)"
 fi
 
-# --- 3. repo -----------------------------------------------------------------
+# --- 3. env ------------------------------------------------------------------
+env_lines=
+if [ ! -e "$ENV_FILE" ]; then
+  ok "env: $ENV_FILE absent; skipped"
+else
+  mode=$(file_mode "$ENV_FILE")
+  case "$mode" in
+    600 | 0600 | 400 | 0400)
+      n=0
+      bad=
+      while IFS= read -r line || [ -n "$line" ]; do
+        n=$((n + 1))
+        t=${line#"${line%%[![:space:]]*}"}
+        case "$t" in '' | '#'*) continue ;; esac
+        key=${line%%=*}
+        case "$line" in
+          *=*)
+            case "$key" in
+              '' | [0-9]* | *[!A-Za-z0-9_]*) bad="$bad $n" ;;
+              *) env_lines="$env_lines$line$NL" ;;
+            esac
+            ;;
+          *) bad="$bad $n" ;;
+        esac
+      done <"$ENV_FILE"
+      if [ -n "$bad" ]; then
+        fail "env: $ENV_FILE line(s)$bad not KEY=value with a valid variable name"
+      else
+        ok "env: $ENV_FILE (mode 0${mode#0})"
+      fi
+      ;;
+    *)
+      fail "env: $ENV_FILE is mode ${mode:-unknown}, not 0600 or 0400 (group or other can read it); run: chmod 600 $ENV_FILE"
+      ;;
+  esac
+fi
+
+# --- 4. repo -----------------------------------------------------------------
 # Local, like the SessionStart hook: parsed from the origin remote, so a
 # repository the bot cannot see is still named, and the permission check
 # below says why rather than "no repo".
@@ -404,7 +457,7 @@ if [ -n "$repo" ]; then
   fi
 fi
 
-# --- 4. install --------------------------------------------------------------
+# --- 5. install --------------------------------------------------------------
 style=${ORCA_STYLE:-}
 case "$style" in
   claude | agents) ;;
@@ -479,7 +532,7 @@ case "$style" in
     ;;
 esac
 
-# --- 5. instance -------------------------------------------------------------
+# --- 6. instance -------------------------------------------------------------
 # Same slug as the watcher's pidfile. A pid is an incumbent only if it is
 # alive AND its command line is an orca launch (pids get recycled), and it
 # is never this process (a recycled pid could be our own). An orca launch is
@@ -540,4 +593,13 @@ GIT_AUTHOR_EMAIL=${ORCA_GIT_EMAIL:-$uid+$login@users.noreply.github.com}
 GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
 GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 export GH_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+# After the identity, so the file cannot replace GH_TOKEN or the git identity.
+# export "$line" assigns the value as written; it is not expanded.
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  key=${line%%=*}
+  eval "[ -n \"\${$key+x}\" ]" || export "$line"
+done <<EOF
+$env_lines
+EOF
 exec claude --agent orca "$@"
