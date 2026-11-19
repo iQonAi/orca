@@ -152,13 +152,15 @@ neither used nor changed. Setup, once:
 
    Other per-machine secrets, such as `LINEAR_API_KEY` for a Linear
    project, go in `~/.config/orca/orca.env` (`ORCA_ENV_FILE` overrides),
-   under the same mode rule. The file is optional. Each line is
-   `KEY=value`, taken literally: no quotes, no expansion, and the file is
-   never run as shell code. Blank lines and lines starting with `#` are
-   skipped; any other line without a valid variable name fails the check
-   with its line number. A variable already set in the environment wins
-   over the file, and so do `GH_TOKEN` and the git identity the launcher
-   sets. The values are never printed.
+   under the same mode rule. The file is optional, but a dangling symlink
+   or an unreadable file fails the check. Each line is `KEY=value`, taken
+   literally: no quotes, no expansion, and the file is never run as shell
+   code; one trailing carriage return is dropped. Blank lines and lines
+   starting with `#` are skipped; any other line without a valid variable
+   name fails the check with its line number. A variable already set in the
+   environment you start orca from wins over the file, and so do `GH_TOKEN`
+   and the git identity the launcher sets. For a key the file repeats, the
+   first line wins. The values are never printed.
 
    ```sh
    (umask 077 && cat > ~/.config/orca/orca.env)   # LINEAR_API_KEY=lin_api_..., Enter, Ctrl-D
@@ -309,7 +311,7 @@ orca
 The launcher runs its preflight checks first and refuses to start if any
 fails, naming every failure in one run:
 
-1. `gh`, `git`, `jq` and `claude` on `PATH`;
+1. `gh`, `git`, `jq`, `claude` and `printenv` on `PATH`;
 2. the token file exists, is not empty and is mode `0600` or `0400`, and
    `gh api user` accepts it (`running as <login>`);
 3. the env file, if present, is mode `0600` or `0400` and every line is

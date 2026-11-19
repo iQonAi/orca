@@ -2770,7 +2770,7 @@ trap 'reap_live_watchers; reap_live_orcas; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/
 L_SYS="$L_TMP/sys"
 mkdir -p "$L_SYS"
 L_SHIM_OK=1
-for t in sh bash git jq ps grep tr stat cat readlink mkdir rm sleep mktemp cp; do
+for t in sh bash git jq ps grep tr stat cat readlink mkdir rm sleep mktemp cp printenv; do
   p="$(command -v "$t")" && ln -s "$p" "$L_SYS/$t" || L_SHIM_OK=0
 done
 L_STUBS="$L_TMP/stubs"
@@ -2913,7 +2913,7 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   run_orca "$REPO_SSH" --check
   wassert 'launcher: --check with everything in place exits 0' test "$ORCA_RC" -eq 0
   orca_said 'launcher: --check names the login it runs as' 'ok: running as orca-bot'
-  orca_said 'launcher: --check reports the tools' 'ok: tools: gh, git, jq, claude on PATH'
+  orca_said 'launcher: --check reports the tools' 'ok: tools: gh, git, jq, claude, printenv on PATH'
   orca_said 'launcher: --check reports the token file and its mode' "ok: token: $L_TOKEN (mode 0600)"
   orca_said 'launcher: --check resolves the repo from an SSH origin and reports the permission' \
     'ok: repo: octocat/hello-world (orca-bot has admin access)'
@@ -3201,6 +3201,49 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: invalid env file lines are named by number' \
     "fail: env: $L_ENVBAD line(s) 2 3 4 not KEY=value with a valid variable name"
   orca_not_said 'launcher: an invalid env file line never prints its value' 'lin_secret'
+  # CRLF endings lose their CR, a last line with no newline still counts, and
+  # 0400 is as private as 0600
+  L_ENVCR="$L_TMP/env-crlf"
+  printf 'ORCA_T_CR=crlf\r\nORCA_T_LAST=last' >"$L_ENVCR"
+  chmod 400 "$L_ENVCR"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVCR")
+  run_orca "$REPO_SSH" --check
+  orca_said 'launcher: a 0400 env file passes with its own mode' "ok: env: $L_ENVCR (mode 0400)"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVCR" ORCA_STUB_SHOW='ORCA_T_CR ORCA_T_LAST')
+  run_orca "$REPO_SSH"
+  orca_said 'launcher: a CRLF env file line is exported without the CR' 'ORCA_T_CR=crlf'$'\n'
+  orca_said 'launcher: an env file last line with no newline is exported' 'ORCA_T_LAST=last'
+  wait_record_gone
+  # a dangling symlink and an unreadable path both fail; neither is "absent"
+  L_ENVDANGLE="$L_TMP/env-dangling"
+  ln -s "$L_TMP/env-gone" "$L_ENVDANGLE"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVDANGLE")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: a dangling env file symlink fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: a dangling env file symlink is named with its target' \
+    "fail: env: $L_ENVDANGLE is a dangling symlink to $L_TMP/env-gone"
+  L_ENVDIR="$L_TMP/env-dir"
+  mkdir "$L_ENVDIR"
+  chmod 700 "$L_ENVDIR"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVDIR")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: an env file path that cannot be read fails --check' test "$ORCA_RC" -eq 1
+  orca_said 'launcher: an env file path that cannot be read is named' "fail: env: $L_ENVDIR is not a readable file"
+  # keys named like the launcher's own shell variables are still exported,
+  # and a repeated key keeps its first line
+  L_ENVNAMES="$L_TMP/env-names"
+  printf '%s\n' mode=m_file repo=r_file token=t_file line=l_file key=k_file \
+    ORCA_T_DUP=first ORCA_T_DUP=second >"$L_ENVNAMES"
+  chmod 600 "$L_ENVNAMES"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVNAMES" ORCA_STUB_SHOW='mode repo token line key ORCA_T_DUP')
+  run_orca "$REPO_SSH"
+  orca_said 'launcher: an env file key named mode is exported' 'mode=m_file'
+  orca_said 'launcher: an env file key named repo is exported' 'repo=r_file'
+  orca_said 'launcher: an env file key named token is exported' 'token=t_file'
+  orca_said 'launcher: an env file key named line is exported' 'line=l_file'
+  orca_said 'launcher: an env file key named key is exported' 'key=k_file'
+  orca_said 'launcher: a repeated env file key keeps its first line' 'ORCA_T_DUP=first'
+  wait_record_gone
 
   # 6. instance: a running orca holds the record with its pid; a second
   # launch for the same repo is refused naming it, another repo is not, and

@@ -25,16 +25,18 @@
 #
 # Per-machine variables such as LINEAR_API_KEY live in
 # ${XDG_CONFIG_HOME:-~/.config}/orca/orca.env (ORCA_ENV_FILE overrides), held
-# to the token file's mode rule. A missing file is skipped. Each line is
-# KEY=value, taken literally: no quotes, no expansion, never run as shell.
-# Blank lines and lines starting with # are skipped. A variable already set in
-# the environment, or by the launcher itself (GH_TOKEN, the git identity),
-# wins over the file. The values are exported to claude and never printed;
-# the launcher's own settings (ORCA_TOKEN_FILE, ORCA_STYLE, ...) are read from
-# the environment only.
+# to the token file's mode rule. A missing file is skipped; a dangling
+# symlink or an unreadable file fails. Each line is KEY=value, taken
+# literally: no quotes, no expansion, never run as shell; one trailing CR is
+# dropped. Blank lines and lines starting with # are skipped. A variable
+# already set in the environment that started the launcher, or exported by
+# the launcher itself (GH_TOKEN, the git identity), wins over the file, and
+# for a key the file repeats, the first line wins. The values are exported
+# to claude and never printed; the launcher's own settings (ORCA_TOKEN_FILE,
+# ORCA_STYLE, ...) are read from the environment only.
 #
 # Checks, in order (each prints `ok:` or `fail:` with the reason):
-#   1. tools     gh, git, jq and claude on PATH
+#   1. tools     gh, git, jq, claude and printenv on PATH
 #   2. identity  the token file exists, is not empty and is mode 0600 or 0400
 #                (a file group or world can read is refused, unread); gh api
 #                user succeeds with it - `running as <login>`
@@ -309,14 +311,14 @@ first_line() { printf '%s\n' "${1%%"$NL"*}"; }
 
 # --- 1. tools ----------------------------------------------------------------
 tools_ok=1
-for t in gh git jq claude; do
+for t in gh git jq claude printenv; do
   if ! command -v "$t" >/dev/null 2>&1; then
     fail "tools: $t not on PATH"
     tools_ok=0
   fi
 done
 if [ "$tools_ok" = 1 ]; then
-  ok "tools: gh, git, jq, claude on PATH"
+  ok "tools: gh, git, jq, claude, printenv on PATH"
 fi
 
 # --- 2. identity -------------------------------------------------------------
@@ -372,8 +374,13 @@ fi
 
 # --- 3. env ------------------------------------------------------------------
 env_lines=
-if [ ! -e "$ENV_FILE" ]; then
+CR=$(printf '\r')
+if [ -L "$ENV_FILE" ] && [ ! -e "$ENV_FILE" ]; then
+  fail "env: $ENV_FILE is a dangling symlink to $(readlink "$ENV_FILE")"
+elif [ ! -e "$ENV_FILE" ]; then
   ok "env: $ENV_FILE absent; skipped"
+elif [ ! -f "$ENV_FILE" ] || [ ! -r "$ENV_FILE" ]; then
+  fail "env: $ENV_FILE is not a readable file"
 else
   mode=$(file_mode "$ENV_FILE")
   case "$mode" in
@@ -382,6 +389,7 @@ else
       bad=
       while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
+        line=${line%"$CR"}
         t=${line#"${line%%[![:space:]]*}"}
         case "$t" in '' | '#'*) continue ;; esac
         key=${line%%=*}
@@ -594,13 +602,18 @@ GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
 GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 export GH_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 # After the identity, so the file cannot replace GH_TOKEN or the git identity.
-# export "$line" assigns the value as written; it is not expanded.
-while IFS= read -r line; do
-  [ -n "$line" ] || continue
-  key=${line%%=*}
-  # shellcheck disable=SC2163
-  eval "[ -n \"\${$key+x}\" ]" || export "$line"
-done <<EOF
-$env_lines
-EOF
+# printenv sees exported variables only, not the launcher's own. Positional
+# parameters only: a file key may share its name with any variable here.
+# export "$1" assigns the value as written; it is not expanded.
+export_env_lines() {
+  while [ $# -gt 0 ]; do
+    # shellcheck disable=SC2163
+    printenv "${1%%=*}" >/dev/null || export "$1"
+    shift
+  done
+}
+IFS=$NL
+set -f
+# shellcheck disable=SC2086
+export_env_lines $env_lines
 exec claude --agent orca "$@"
