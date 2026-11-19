@@ -598,6 +598,7 @@ export GH_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTE
 while IFS= read -r line; do
   [ -n "$line" ] || continue
   key=${line%%=*}
+  # shellcheck disable=SC2163
   eval "[ -n \"\${$key+x}\" ]" || export "$line"
 done <<EOF
 $env_lines
