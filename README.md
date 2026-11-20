@@ -111,9 +111,10 @@ Environment overrides:
 | `CLAUDE_HOME` | `~/.claude`            | claude-style destination                       |
 | `ORCA_BIN`    | `~/.local/bin`         | launcher destination (both styles), and agents-style watcher and project data reader destination |
 | `ORCA_TOKEN_FILE` | `~/.config/orca/token` | (launcher) the bot's token file; `~/.config` follows `XDG_CONFIG_HOME` |
+| `ORCA_ENV_FILE` | `~/.config/orca/orca.env` | (launcher) optional `KEY=value` file exported to orca, such as `LINEAR_API_KEY`; `~/.config` follows `XDG_CONFIG_HOME` |
 | `ORCA_GIT_NAME` | the bot's login      | (launcher) git author and committer name orca commits with |
 | `ORCA_GIT_EMAIL` | `<id>+<login>@users.noreply.github.com` | (launcher) git author and committer email orca commits with |
-| `LINEAR_API_KEY` | unset             | (watcher) a Linear personal API key; required when `.orca/project.json` names the `linear` tracker, unused otherwise |
+| `LINEAR_API_KEY` | unset             | (watcher) a Linear personal API key; required when `.orca/project.json` names the `linear` tracker, unused otherwise; the launcher can load it from `orca.env` (see `ORCA_ENV_FILE`) |
 | `GH_WATCH_CONFIRM_DELAY` | `5`         | (watcher) seconds between a poll that differs from the baseline and the fetch that has to differ from it too before the watcher exits. Anything that is not a positive integer is reported on stderr and replaced by the default |
 
 Re-runs are idempotent. Anything replaced is backed up to
@@ -148,6 +149,24 @@ neither used nor changed. Setup, once:
 
    `ORCA_TOKEN_FILE` points the launcher at another file; `~/.config`
    follows `XDG_CONFIG_HOME`.
+
+   Other per-machine secrets, such as `LINEAR_API_KEY` for a Linear
+   project, go in `~/.config/orca/orca.env` (`ORCA_ENV_FILE` overrides),
+   under the same mode rule. The file is optional, but a dangling symlink
+   or an unreadable file fails the check. Each line is `KEY=value`, taken
+   literally: no quotes, no expansion, and the file is never run as shell
+   code; one trailing carriage return is dropped. Blank lines and lines
+   starting with `#` are skipped; any other line without a valid variable
+   name fails the check with its line number. A variable already set in
+   the environment you start orca from wins over the file, and so do
+   `GH_TOKEN` and the git identity the launcher sets. For a key the file
+   repeats, the first line wins. The values go to claude's environment
+   only, never into the launcher's shell, and are never printed.
+
+   ```sh
+   (umask 077 && cat > ~/.config/orca/orca.env)   # LINEAR_API_KEY=lin_api_..., Enter, Ctrl-D
+   chmod 600 ~/.config/orca/orca.env
+   ```
 5. From a checkout of a managed repository, run `orca --check`. It prints
    one `ok:` or `fail:` line per check, names every failure in one run, and
    launches nothing; `running as <login>` is the account it found. Then
@@ -241,8 +260,9 @@ Deliberately left alone:
   the same thing install does when it wires the hook.)
 - **Directories that are not orca's** — `~/.claude/*` and `~/.local/bin` stay
   whatever else they hold.
-- **The bot's token.** `~/.config/orca/token` — and the launcher's
-  `sessions/` records beside it — are never created, backed up, or removed
+- **The bot's token and env file.** `~/.config/orca/token` and
+  `~/.config/orca/orca.env` — and the launcher's `sessions/` records beside
+  them — are never created, backed up, or removed
   by install, uninstall, or restore. `~/.config/orca` is only ever removed
   when it is empty.
 - **The checkout at `~/.local/share/orca`.** Delete it yourself if you want
@@ -292,17 +312,19 @@ orca
 The launcher runs its preflight checks first and refuses to start if any
 fails, naming every failure in one run:
 
-1. `gh`, `git`, `jq` and `claude` on `PATH`;
+1. `gh`, `git`, `jq`, `claude` and `printenv` on `PATH`;
 2. the token file exists, is not empty and is mode `0600` or `0400`, and
    `gh api user` accepts it (`running as <login>`);
-3. the repository, detected from the checkout's `origin` remote
+3. the env file, if present, is mode `0600` or `0400` and every line is
+   blank, a comment or `KEY=value`;
+4. the repository, detected from the checkout's `origin` remote
    (`--repo owner/repo` overrides), and the bot's permission on it — write,
    maintain or admin;
-4. the installed files — the playbook, the hook, the watcher and the
+5. the installed files — the playbook, the hook, the watcher and the
    project data reader — resolve to real files (a dangling symlink is named
    with its target) and, claude style, the `SessionStart` hook is wired in
    `settings.json`;
-5. no other orca holds this repository
+6. no other orca holds this repository
    (`~/.config/orca/sessions/<repo-slug>` records the running one's pid; a
    record left by a dead session never blocks).
 
@@ -533,10 +555,10 @@ On your machine:
   and a re-run then changes them with no review step. `ORCA_MODE=copy` pins
   what you reviewed either way.
 - Both styles install the launcher to `~/.local/bin/orca`. It reads
-  `~/.config/orca/token` and nothing else there. On launch it creates
-  `~/.config/orca/sessions/` if it is absent and writes one file in it,
-  `<repo-slug>`, holding the pid of the running orca; it removes that file
-  when that orca exits, and the directory stays.
+  `~/.config/orca/token`, `~/.config/orca/orca.env` and nothing else there.
+  On launch it creates `~/.config/orca/sessions/` if it is absent and writes
+  one file in it, `<repo-slug>`, holding the pid of the running orca; it
+  removes that file when that orca exits, and the directory stays.
 
 On your repo: comments on issues, sets labels, pushes branches, opens PRs,
 posts and resolves review threads, requests reviewers, and merges its own PRs.
