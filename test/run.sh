@@ -3244,6 +3244,38 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
   orca_said 'launcher: an env file key named key is exported' 'key=k_file'
   orca_said 'launcher: a repeated env file key keeps its first line' 'ORCA_T_DUP=first'
   wait_record_gone
+  # precedence is settled before the first export: an EXECIGNORE line that
+  # hides printenv from bash cannot let later lines win
+  L_ENVIGN="$L_TMP/env-execignore"
+  printf '%s\n' 'EXECIGNORE=*/printenv' GH_TOKEN=evil GIT_AUTHOR_EMAIL=evil@x LINEAR_API_KEY=lin_file >"$L_ENVIGN"
+  chmod 600 "$L_ENVIGN"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVIGN" LINEAR_API_KEY=lin_fromenv ORCA_STUB_SHOW=LINEAR_API_KEY)
+  run_orca "$REPO_SSH"
+  orca_said 'launcher: an EXECIGNORE line cannot replace GH_TOKEN' 'GH_TOKEN=ghp_stubtoken'
+  orca_said 'launcher: an EXECIGNORE line cannot replace the git identity' \
+    'GIT_AUTHOR_EMAIL=424242+orca-bot@users.noreply.github.com'
+  orca_said 'launcher: an EXECIGNORE line cannot beat the environment' 'LINEAR_API_KEY=lin_fromenv'
+  wait_record_gone
+  # a read-only name fails the check (bash as sh); where sh lets it be set
+  # (dash), it is exported like any other key. Either way --check and the
+  # launch agree.
+  L_ENVRO="$L_TMP/env-readonly"
+  printf 'UID=1\n' >"$L_ENVRO"
+  chmod 600 "$L_ENVRO"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVRO")
+  run_orca "$REPO_SSH" --check
+  if sh -c 'export UID=1' 2>/dev/null; then
+    wassert 'launcher: UID=1 passes --check where sh allows it' test "$ORCA_RC" -eq 0
+    ORCA_ENV=(ORCA_ENV_FILE="$L_ENVRO" ORCA_STUB_SHOW=UID)
+    run_orca "$REPO_SSH"
+    orca_said 'launcher: UID=1 launches where sh allows it' 'UID=1'
+    wait_record_gone
+  else
+    wassert 'launcher: a read-only env file key fails --check' test "$ORCA_RC" -eq 1
+    orca_said 'launcher: a read-only env file key is named with its line' \
+      "fail: env: $L_ENVRO sets read-only shell variables (line 1: UID); remove them"
+    orca_not_said 'launcher: a read-only env file key passes nothing else as ok' "ok: env: $L_ENVRO"
+  fi
 
   # 6. instance: a running orca holds the record with its pid; a second
   # launch for the same repo is refused naming it, another repo is not, and

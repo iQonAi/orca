@@ -28,10 +28,11 @@
 # to the token file's mode rule. A missing file is skipped; a dangling
 # symlink or an unreadable file fails. Each line is KEY=value, taken
 # literally: no quotes, no expansion, never run as shell; one trailing CR is
-# dropped. Blank lines and lines starting with # are skipped. A variable
-# already set in the environment that started the launcher, or exported by
-# the launcher itself (GH_TOKEN, the git identity), wins over the file, and
-# for a key the file repeats, the first line wins. The values are exported
+# dropped. Blank lines and lines starting with # are skipped; a read-only
+# shell variable name fails the check. A variable already set in the
+# environment that started the launcher, or exported by the launcher itself
+# (GH_TOKEN, the git identity), wins over the file, and for a key the file
+# repeats, the first line wins. The values are exported
 # to claude and never printed; the launcher's own settings (ORCA_TOKEN_FILE,
 # ORCA_STYLE, ...) are read from the environment only.
 #
@@ -387,6 +388,7 @@ else
     600 | 0600 | 400 | 0400)
       n=0
       bad=
+      ro=
       while IFS= read -r line || [ -n "$line" ]; do
         n=$((n + 1))
         line=${line%"$CR"}
@@ -397,7 +399,16 @@ else
           *=*)
             case "$key" in
               '' | [0-9]* | *[!A-Za-z0-9_]*) bad="$bad $n" ;;
-              *) env_lines="$env_lines$line$NL" ;;
+              *)
+                # A read-only name (UID, PPID under bash) would end the launch
+                # at the export; catch it here so --check agrees.
+                # shellcheck disable=SC2163
+                if (export "$line") 2>/dev/null; then
+                  env_lines="$env_lines$line$NL"
+                else
+                  ro="$ro, line $n: $key"
+                fi
+                ;;
             esac
             ;;
           *) bad="$bad $n" ;;
@@ -405,7 +416,11 @@ else
       done <"$ENV_FILE"
       if [ -n "$bad" ]; then
         fail "env: $ENV_FILE line(s)$bad not KEY=value with a valid variable name"
-      else
+      fi
+      if [ -n "$ro" ]; then
+        fail "env: $ENV_FILE sets read-only shell variables (${ro#, }); remove them"
+      fi
+      if [ -z "$bad$ro" ]; then
         ok "env: $ENV_FILE (mode 0${mode#0})"
       fi
       ;;
@@ -602,18 +617,33 @@ GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME
 GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 export GH_TOKEN GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
 # After the identity, so the file cannot replace GH_TOKEN or the git identity.
-# printenv sees exported variables only, not the launcher's own. Positional
-# parameters only: a file key may share its name with any variable here.
-# export "$1" assigns the value as written; it is not expanded.
+# Precedence is decided for every line before anything from the file is
+# exported: an exported line (EXECIGNORE, PATH, ...) could change how a later
+# printenv runs. printenv sees exported variables only, not the launcher's
+# own. The first line for a key wins.
+keep=
+names=" "
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  key=${line%%=*}
+  case "$names" in *" $key "*) continue ;; esac
+  names="$names$key "
+  printenv "$key" >/dev/null || keep="$keep$line$NL"
+done <<EOF
+$env_lines
+EOF
+# Builtins only from here to exec. Positional parameters only: a file key may
+# share its name with any variable here. export "$1" assigns the value as
+# written; it is not expanded.
 export_env_lines() {
   while [ $# -gt 0 ]; do
     # shellcheck disable=SC2163
-    printenv "${1%%=*}" >/dev/null || export "$1"
+    export "$1"
     shift
   done
 }
 IFS=$NL
 set -f
 # shellcheck disable=SC2086
-export_env_lines $env_lines
+export_env_lines $keep
 exec claude --agent orca "$@"
