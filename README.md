@@ -157,11 +157,11 @@ neither used nor changed. Setup, once:
    literally: no quotes, no expansion, and the file is never run as shell
    code; one trailing carriage return is dropped. Blank lines and lines
    starting with `#` are skipped; any other line without a valid variable
-   name fails the check with its line number, and so does a key the shell
-   holds read-only (such as `UID` when `/bin/sh` is bash). A variable
-   already set in the environment you start orca from wins over the file,
-   and so do `GH_TOKEN` and the git identity the launcher sets. For a key
-   the file repeats, the first line wins. The values are never printed.
+   name fails the check with its line number. A variable already set in
+   the environment you start orca from wins over the file, and so do
+   `GH_TOKEN` and the git identity the launcher sets. For a key the file
+   repeats, the first line wins. The values go to claude's environment
+   only, never into the launcher's shell, and are never printed.
 
    ```sh
    (umask 077 && cat > ~/.config/orca/orca.env)   # LINEAR_API_KEY=lin_api_..., Enter, Ctrl-D

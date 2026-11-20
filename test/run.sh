@@ -2749,8 +2749,9 @@ chmod u+rwx "$IM10/.claude/agents"
 # collaborator-permission call from canned JSON (through real jq, as gh's
 # --jq would) and accepts ONE token, so "GH_TOKEN was set from the file" is
 # asserted, not assumed. The stub claude prints the argv and the identity it
-# was exec'd with (and the variables ORCA_STUB_SHOW names), and can hold
-# the session open. HOME, XDG_CONFIG_HOME and
+# was exec'd with (and the variables ORCA_STUB_SHOW names, and, as `raw`
+# lines, the exec-time environment entries ORCA_STUB_RAW names, which bash
+# would otherwise rewrite for RANDOM or UID), and can hold the session open. HOME, XDG_CONFIG_HOME and
 # CLAUDE_HOME are temp dirs; the install the checks look at is made by
 # install.sh itself, so the check sees exactly what a user's would.
 
@@ -2770,7 +2771,7 @@ trap 'reap_live_watchers; reap_live_orcas; chmod u+rwx "$GH_TMP/nowrite" 2>/dev/
 L_SYS="$L_TMP/sys"
 mkdir -p "$L_SYS"
 L_SHIM_OK=1
-for t in sh bash git jq ps grep tr stat cat readlink mkdir rm sleep mktemp cp printenv; do
+for t in sh bash git jq ps grep tr stat cat readlink mkdir rm sleep mktemp cp printenv env; do
   p="$(command -v "$t")" && ln -s "$p" "$L_SYS/$t" || L_SHIM_OK=0
 done
 L_STUBS="$L_TMP/stubs"
@@ -2834,6 +2835,13 @@ done
 for v in ${ORCA_STUB_SHOW-}; do
   printf '%s=%s\n' "$v" "${!v-unset}"
 done
+if [ -n "${ORCA_STUB_RAW-}" ] && [ -r "/proc/$$/environ" ]; then
+  while IFS= read -r -d '' kv; do
+    for v in $ORCA_STUB_RAW; do
+      [[ "$kv" == "$v="* ]] && printf 'raw %s\n' "$kv"
+    done
+  done <"/proc/$$/environ"
+fi
 if [ -n "${ORCA_STUB_HOLD:-}" ]; then
   trap 'kill "$sp" 2>/dev/null; exit 0' TERM INT
   sleep "$ORCA_STUB_HOLD" &
@@ -3256,26 +3264,65 @@ if [[ "$L_SHIM_OK" == 1 ]]; then
     'GIT_AUTHOR_EMAIL=424242+orca-bot@users.noreply.github.com'
   orca_said 'launcher: an EXECIGNORE line cannot beat the environment' 'LINEAR_API_KEY=lin_fromenv'
   wait_record_gone
-  # a read-only name fails the check (bash as sh); where sh lets it be set
-  # (dash), it is exported like any other key. Either way --check and the
-  # launch agree.
+  # no file line is ever assigned in the launcher's shell: bash evaluates
+  # RANDOM and OPTIND as arithmetic, runs a subscript's $(...), and takes
+  # EXECIGNORE for its PATH search. The lines reach claude through env as
+  # data. raw lines need /proc.
+  L_HAS_PROC=0
+  [ -r /proc/self/environ ] && L_HAS_PROC=1
+  L_ENVARITH="$L_TMP/env-arith"
+  printf '%s\n' 'RANDOM=n[$(mkdir '"$L_TMP"'/pwned-random)]' 'OPTIND=n[$(mkdir '"$L_TMP"'/pwned-optind)]' >"$L_ENVARITH"
+  chmod 600 "$L_ENVARITH"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVARITH")
+  run_orca "$REPO_SSH" --check
+  wassert 'launcher: RANDOM and OPTIND lines pass --check' test "$ORCA_RC" -eq 0
+  wassert 'launcher: --check runs nothing from a RANDOM or OPTIND value' \
+    bash -c "test ! -e '$L_TMP/pwned-random' && test ! -e '$L_TMP/pwned-optind'"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVARITH" ORCA_STUB_RAW='RANDOM OPTIND')
+  run_orca "$REPO_SSH"
+  wassert 'launcher: RANDOM and OPTIND lines launch' test "$ORCA_RC" -eq 0
+  wassert 'launcher: a launch runs nothing from a RANDOM or OPTIND value' \
+    bash -c "test ! -e '$L_TMP/pwned-random' && test ! -e '$L_TMP/pwned-optind'"
+  if [ "$L_HAS_PROC" = 1 ]; then
+    orca_said 'launcher: a RANDOM value reaches claude literally' 'raw RANDOM=n[$(mkdir '"$L_TMP"'/pwned-random)]'
+    orca_said 'launcher: an OPTIND value reaches claude literally' 'raw OPTIND=n[$(mkdir '"$L_TMP"'/pwned-optind)]'
+  fi
+  wait_record_gone
+  # a RANDOM line cannot disturb a later key; claude arguments with = in them
+  # come through intact behind the env lines
+  L_ENVRK="$L_TMP/env-random-key"
+  printf '%s\n' RANDOM=key FOO=hello >"$L_ENVRK"
+  chmod 600 "$L_ENVRK"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVRK" ORCA_STUB_SHOW=FOO)
+  run_orca "$REPO_SSH" --foo=bar x=y
+  wassert 'launcher: RANDOM=key then FOO=hello launches' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: the key after RANDOM=key reaches claude' 'FOO=hello'
+  orca_said 'launcher: claude arguments containing = reach claude unchanged' \
+    'stub claude argv: [--agent] [orca] [--foo=bar] [x=y]'$'\n'
+  wait_record_gone
+  # EXECIGNORE cannot hide or swap the claude the launcher execs
+  for L_IGN in '*/claude' "$L_STUBS/claude"; do
+    printf 'EXECIGNORE=%s\n' "$L_IGN" >"$L_TMP/env-execignore-claude"
+    chmod 600 "$L_TMP/env-execignore-claude"
+    ORCA_ENV=(ORCA_ENV_FILE="$L_TMP/env-execignore-claude")
+    run_orca "$REPO_SSH"
+    wassert "launcher: EXECIGNORE=$L_IGN still launches" test "$ORCA_RC" -eq 0
+    orca_said "launcher: EXECIGNORE=$L_IGN still runs the stub claude" 'stub claude argv: [--agent] [orca]'
+    orca_said "launcher: EXECIGNORE=$L_IGN leaves the real GH_TOKEN" 'GH_TOKEN=ghp_stubtoken'
+    wait_record_gone
+  done
+  # a name bash holds read-only launches on any shell
   L_ENVRO="$L_TMP/env-readonly"
   printf 'UID=1\n' >"$L_ENVRO"
   chmod 600 "$L_ENVRO"
-  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVRO")
-  run_orca "$REPO_SSH" --check
-  if sh -c 'export UID=1' 2>/dev/null; then
-    wassert 'launcher: UID=1 passes --check where sh allows it' test "$ORCA_RC" -eq 0
-    ORCA_ENV=(ORCA_ENV_FILE="$L_ENVRO" ORCA_STUB_SHOW=UID)
-    run_orca "$REPO_SSH"
-    orca_said 'launcher: UID=1 launches where sh allows it' 'UID=1'
-    wait_record_gone
-  else
-    wassert 'launcher: a read-only env file key fails --check' test "$ORCA_RC" -eq 1
-    orca_said 'launcher: a read-only env file key is named with its line' \
-      "fail: env: $L_ENVRO sets read-only shell variables (line 1: UID); remove them"
-    orca_not_said 'launcher: a read-only env file key passes nothing else as ok' "ok: env: $L_ENVRO"
+  ORCA_ENV=(ORCA_ENV_FILE="$L_ENVRO" ORCA_STUB_RAW=UID)
+  run_orca "$REPO_SSH"
+  wassert 'launcher: UID=1 launches' test "$ORCA_RC" -eq 0
+  orca_said 'launcher: UID=1 reaches claude' 'stub claude argv: [--agent] [orca]'
+  if [ "$L_HAS_PROC" = 1 ]; then
+    orca_said 'launcher: UID=1 is in the environment claude was exec'"'"'d with' 'raw UID=1'
   fi
+  wait_record_gone
 
   # 6. instance: a running orca holds the record with its pid; a second
   # launch for the same repo is refused naming it, another repo is not, and
